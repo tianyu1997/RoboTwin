@@ -8,6 +8,11 @@ gpu_id=${3}
 
 export CUDA_VISIBLE_DEVICES=${gpu_id}
 
+# If DISPLAY is not set, default to :0 so SAPIEN can initialize an X/OpenGL context
+if [ -z "$DISPLAY" ]; then
+	export DISPLAY=:0
+fi
+
 PYTHONWARNINGS=ignore::UserWarning \
 python script/collect_data.py $task_name $task_config
 rm -rf data/${task_name}/${task_config}/.cache

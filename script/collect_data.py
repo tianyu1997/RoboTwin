@@ -55,7 +55,7 @@ def main(task_name=None, task_config=None):
     def get_embodiment_file(embodiment_type):
         robot_file = _embodiment_types[embodiment_type]["file_path"]
         if robot_file is None:
-            raise "missing embodiment files"
+            raise FileNotFoundError("missing embodiment files")
         return robot_file
 
     if len(embodiment_type) == 1:
@@ -68,7 +68,7 @@ def main(task_name=None, task_config=None):
         args["embodiment_dis"] = embodiment_type[2]
         args["dual_arm_embodied"] = False
     else:
-        raise "number of embodiment config parameters should be 1 or 3"
+        raise ValueError("number of embodiment config parameters should be 1 or 3")
 
     args["left_embodiment_config"] = get_embodiment_config(args["left_robot_file"])
     args["right_embodiment_config"] = get_embodiment_config(args["right_robot_file"])
@@ -117,9 +117,9 @@ def run(TASK_ENV, args):
 
         if os.path.exists(os.path.join(args["save_path"], "seed.txt")):
             with open(os.path.join(args["save_path"], "seed.txt"), "r") as file:
-                seed_list = file.read().split()
+                seed_strs = file.read().split()
+                seed_list = [int(i) for i in seed_strs] if seed_strs else []
                 if len(seed_list) != 0:
-                    seed_list = [int(i) for i in seed_list]
                     suc_num = len(seed_list)
                     epid = max(seed_list) + 1
             print(f"Exist seed file, Start from: {epid} / {suc_num}")
