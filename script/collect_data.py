@@ -234,17 +234,18 @@ def run(TASK_ENV, args):
 
 
 if __name__ == "__main__":
-    from test_render import Sapien_TEST
-    Sapien_TEST()
+    # from test_render import Sapien_TEST
+    # Sapien_TEST()
 
     import torch.multiprocessing as mp
     mp.set_start_method("spawn", force=True)
 
     parser = ArgumentParser()
-    parser.add_argument("task_name", type=str)
-    parser.add_argument("task_config", type=str)
-    parser = parser.parse_args()
-    task_name = parser.task_name
-    task_config = parser.task_config
+    # Make these positional args optional so the script can run with defaults when no args are supplied.
+    parser.add_argument("task_name", nargs='?', type=str, default="beat_block_hammer", help="Name of the task (positional, optional)")
+    parser.add_argument("task_config", nargs='?', type=str, default="demo_randomized", help="Task config name (positional, optional)")
+    args = parser.parse_args()
+    task_name = args.task_name
+    task_config = args.task_config
 
     main(task_name=task_name, task_config=task_config)

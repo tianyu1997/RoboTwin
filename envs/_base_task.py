@@ -72,7 +72,7 @@ class Base_Task(gym.Env):
         self.need_topp = True  # TODO
 
         # Random
-        random_setting = kwags.get("domain_randomization")
+        random_setting = kwags.get("domain_randomization") or {}
         self.random_background = random_setting.get("random_background", False)
         self.cluttered_table = random_setting.get("cluttered_table", False)
         self.clean_background_rate = random_setting.get("clean_background_rate", 1)
@@ -124,7 +124,7 @@ class Base_Task(gym.Env):
 
         render_freq = self.render_freq
         self.render_freq = 0
-        self.together_open_gripper(save_freq=None)
+        self.together_open_gripper(save_freq=-1)
         self.render_freq = render_freq
 
         self.robot.set_origin_endpose()
@@ -413,6 +413,14 @@ class Base_Task(gym.Env):
         self.cameras.load_camera(self.scene)
         self.scene.step()  # run a physical step
         self.scene.update_render()  # sync pose from SAPIEN to renderer
+
+    def load_actors(self):
+        """
+        Placeholder method to load additional actors into the scene.
+        Subclasses may override this to add task-specific actors; kept as a
+        no-op here to ensure self.load_actors() is always available.
+        """
+        return
 
     # =========================================================== Sapien ===========================================================
 

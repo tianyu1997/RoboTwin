@@ -96,6 +96,8 @@ def make_prompt_generate(imgStr, object_name):
         },
     ]
     result = generate(messages, ObjDescFormat)
+    if result is None:
+        raise ValueError("No response from the model.")
     result_dict = result.model_dump()
     print(
         json.dumps(
@@ -128,6 +130,9 @@ def generate_obj_description(object_name, glb_file_name):
     print(f"{object_name} {glb_file_name} start generating", time.time() - time_start)
     time_start = time.time()
     result = make_prompt_generate(imgstr, object_name)
+    if result is None:
+        print(f"{object_name} {glb_file_name} failed to generate description")
+        return
     print(
         f"{object_name} {glb_file_name} generated {len(str(result.model_dump()))} descriptions ",
         time.time() - time_start,
