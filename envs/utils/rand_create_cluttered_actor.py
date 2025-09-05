@@ -263,7 +263,8 @@ def rand_create_cluttered_actor(
 
 
 def create_cluttered_urdf_obj(scene, pose: sapien.Pose, modelname: str, scale=1.0, fix_root_link=True) -> Actor:
-    scene, pose = preprocess(scene, pose)
+    scene_orig = scene
+    scene, pose = preprocess(scene_orig, pose)
     modeldir = Path("assets") / modelname
 
     loader: sapien.URDFLoader = scene.create_urdf_loader()
@@ -274,6 +275,9 @@ def create_cluttered_urdf_obj(scene, pose: sapien.Pose, modelname: str, scale=1.
     object.set_pose(pose)
 
     if isinstance(object, sapien.physx.PhysxArticulation):
-        return ArticulationActor(object, None)
+        actor = ArticulationActor(object, None)
     else:
-        return Actor(object, None)
+        actor = Actor(object, None)
+    if hasattr(scene_orig, 'actors'):
+        scene_orig.actors.append(actor)
+    return actor

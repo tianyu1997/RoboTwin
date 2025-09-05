@@ -34,7 +34,6 @@ class beat_block_hammer(Base_Task):
                 rotate_rand=True,
                 rotate_lim=[0, 0, 0.5],
             )
-
         self.block = create_box(
             scene=self,
             pose=block_pose,

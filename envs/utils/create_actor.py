@@ -194,7 +194,10 @@ def create_box(
             "contact_points_mask": [True, True],
             "target_point_description": ["The center point on the bottom of the box."],
         }
-    return Actor(entity, data)
+    actor = Actor(entity, data)
+    if hasattr(scene, 'actors'):
+        scene.actors.append(actor)
+    return actor
 
 
 # create spere
@@ -400,7 +403,8 @@ def create_obj(
         model_id=None,
         no_collision=False,
 ) -> Actor:
-    scene, pose = preprocess(scene, pose)
+    scene_orig = scene
+    scene, pose = preprocess(scene_orig, pose)
 
     modeldir = Path("assets/objects") / modelname
     if model_id is None:
@@ -432,9 +436,10 @@ def create_obj(
     builder.add_visual_from_file(filename=str(file_name), scale=scale)
     mesh = builder.build(name=modelname)
     mesh.set_pose(pose)
-
-    return Actor(mesh, model_data)
-
+    actor = Actor(mesh, model_data)
+    if hasattr(scene_orig, 'actors'):
+        scene_orig.actors.append(actor)
+    return actor
 
 # create glb model
 def create_glb(
@@ -480,8 +485,9 @@ def create_glb(
     builder.add_visual_from_file(filename=str(file_name), scale=scale)
     mesh = builder.build(name=modelname)
     mesh.set_pose(pose)
-
-    return Actor(mesh, model_data)
+    actor = Actor(mesh, model_data)
+    scene.actors.append(Actor(mesh, model_data))
+    return actor
 
 
 def get_glb_or_obj_file(modeldir, model_id):
@@ -507,7 +513,8 @@ def create_actor(
         is_static=False,
         model_id=0,
 ) -> Actor:
-    scene, pose = preprocess(scene, pose)
+    scene_orig = scene
+    scene, pose = preprocess(scene_orig, pose)
     modeldir = Path("assets/objects") / modelname
 
     if model_id is None:
@@ -556,7 +563,10 @@ def create_actor(
     mesh = builder.build(name=modelname)
     mesh.set_name(modelname)
     mesh.set_pose(pose)
-    return Actor(mesh, model_data)
+    actor = Actor(mesh, model_data)
+    if hasattr(scene_orig, 'actors'):
+        scene_orig.actors.append(actor)
+    return actor
 
 
 # create urdf model
@@ -581,7 +591,10 @@ def create_urdf_obj(scene, pose: sapien.Pose, modelname: str, scale=1.0, fix_roo
 
     object.set_root_pose(pose)
     object.set_name(modelname)
-    return ArticulationActor(object, model_data)
+    actor = ArticulationActor(object, model_data)
+    if hasattr(scene, 'actors'):
+        scene.actors.append(actor)
+    return actor
 
 
 def create_sapien_urdf_obj(
@@ -592,7 +605,8 @@ def create_sapien_urdf_obj(
     modelid: int = None,
     fix_root_link=False,
 ) -> ArticulationActor:
-    scene, pose = preprocess(scene, pose)
+    scene_orig = scene
+    scene, pose = preprocess(scene_orig, pose)
 
     modeldir = Path("assets") / "objects" / modelname
     if modelid is not None:
@@ -651,4 +665,7 @@ def create_sapien_urdf_obj(
             bounding_box = json.load(open(bounding_box_file, "r", encoding="utf-8"))
             model_data["extents"] = (np.array(bounding_box["max"]) - np.array(bounding_box["min"])).tolist()
     object.set_name(modelname)
-    return ArticulationActor(object, model_data)
+    actor = ArticulationActor(object, model_data)
+    if hasattr(scene_orig, 'actors'):
+        scene_orig.actors.append(actor)
+    return actor

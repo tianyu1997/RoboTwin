@@ -82,8 +82,8 @@ class Base_Task(gym.Env):
         self.crazy_random_light_rate = random_setting.get("crazy_random_light_rate", 0)
         self.crazy_random_light = (0 if not self.random_light else np.random.rand() < self.crazy_random_light_rate)
         self.random_embodiment = random_setting.get("random_embodiment", False)  # TODO
-
-        self.file_path = []
+        self.actors = []
+        self.file_path = [] 
         self.plan_success = True
         self.step_lim = None
         self.fix_gripper = False
@@ -154,6 +154,10 @@ class Base_Task(gym.Env):
             "wall_texture": self.wall_texture,
             "table_texture": self.table_texture,
         }
+        self.info["actor_info"] = [
+            {"name": actor.get_name(), "pose": actor.get_pose().p.tolist()}
+            for actor in self.actors 
+        ]
         self.info["info"] = {}
 
         self.stage_success_tag = False
@@ -370,11 +374,11 @@ class Base_Task(gym.Env):
             self.cluttered_obj.set_name(f"{obj_name}")
             self.cluttered_objs.append(self.cluttered_obj)
             pose = self.cluttered_obj.get_pose().p.tolist()
+            self.record_cluttered_objects.append({"object_type": obj_name, "object_index": obj_idx, 'pose': pose})
             pose.append(obj_radius)
             self.size_dict.append(pose)
             success_count += 1
-            self.record_cluttered_objects.append({"object_type": obj_name, "object_index": obj_idx})
-
+            
         if success_count < cluttered_numbers:
             print(f"Warning: Only {success_count} cluttered objects are placed on the table.")
 

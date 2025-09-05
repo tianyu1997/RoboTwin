@@ -66,7 +66,7 @@ def rand_create_obj(
         qpos=qpos,
     )
 
-    return create_obj(
+    actor = create_obj(
         scene=scene,
         pose=obj_pose,
         modelname=modelname,
@@ -75,6 +75,9 @@ def rand_create_obj(
         is_static=is_static,
         model_id=model_id,
     )
+    if hasattr(scene, 'actors'):
+        scene.actors.append(actor)  # Append the created actor to the scene's actor list
+    return actor
 
 
 def rand_create_glb(
@@ -102,8 +105,7 @@ def rand_create_glb(
         rotate_lim=rotate_lim,
         qpos=qpos,
     )
-
-    return create_glb(
+    actor = create_glb(
         scene=scene,
         pose=obj_pose,
         modelname=modelname,
@@ -112,6 +114,9 @@ def rand_create_glb(
         is_static=is_static,
         model_id=model_id,
     )
+    if hasattr(scene, 'actors'):
+        scene.actors.append(actor)  # Append the created actor to the scene's actor list
+    return actor
 
 
 def rand_create_urdf_obj(
@@ -138,13 +143,16 @@ def rand_create_urdf_obj(
         qpos=qpos,
     )
 
-    return create_urdf_obj(
+    actor = create_urdf_obj(
         scene,
         pose=obj_pose,
         modelname=modelname,
         scale=scale,
         fix_root_link=fix_root_link,
     )
+    if hasattr(scene, 'actors'):
+        scene.actors.append(actor)
+    return actor
 
 
 def rand_create_sapien_urdf_obj(
@@ -170,7 +178,8 @@ def rand_create_sapien_urdf_obj(
         rotate_lim=rotate_lim,
         qpos=qpos,
     )
-    return create_sapien_urdf_obj(
+
+    actor = create_sapien_urdf_obj(
         scene=scene,
         pose=obj_pose,
         modelname=modelname,
@@ -178,7 +187,9 @@ def rand_create_sapien_urdf_obj(
         scale=scale,
         fix_root_link=fix_root_link,
     )
-
+    if hasattr(scene, 'actors'):
+        scene.actors.append(actor)
+    return actor 
 
 def rand_create_actor(
         scene,
@@ -206,7 +217,7 @@ def rand_create_actor(
         qpos=qpos,
     )
 
-    return create_actor(
+    actor = create_actor(
         scene=scene,
         pose=obj_pose,
         modelname=modelname,
@@ -215,3 +226,7 @@ def rand_create_actor(
         is_static=is_static,
         model_id=model_id,
     )
+
+    if hasattr(scene, 'actors'):
+        scene.actors.append(actor)  # Append the created actor to the scene's actor list
+    return actor
