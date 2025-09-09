@@ -374,11 +374,11 @@ class Base_Task(gym.Env):
             self.cluttered_obj.set_name(f"{obj_name}")
             self.cluttered_objs.append(self.cluttered_obj)
             pose = self.cluttered_obj.get_pose().p.tolist()
-            self.record_cluttered_objects.append({"object_type": obj_name, "object_index": obj_idx, 'pose': self.cluttered_obj.get_pose().p.tolist()})
             pose.append(obj_radius)
             self.size_dict.append(pose)
             success_count += 1
-            
+            self.record_cluttered_objects.append({"object_type": obj_name, "object_index": obj_idx, 'pose': pose})
+
         if success_count < cluttered_numbers:
             print(f"Warning: Only {success_count} cluttered objects are placed on the table.")
 
