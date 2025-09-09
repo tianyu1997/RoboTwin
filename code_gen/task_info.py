@@ -1382,6 +1382,30 @@ PUT_OBJECT_CABINET = {
     }
 }
 
+EXPLORE_CABINET = {
+    "task_name": "explore_cabinet",
+    "task_description": "Use one arm to open the cabinet, and use another arm to pick the object and put it into the cabinet.\
+                        Grasp the cabinet handle with one arm and open the cabinet. Grasp the object with the other arm and place it into the cabinet.",
+    "current_code": """
+                class gpt_explore_cabinet(explore_cabinet):
+                    def play_once(self):
+                        pass
+                """,
+    "actor_list": {
+        "self.object": {
+            "name": "object",
+            "description": "The object that put in the cabinet.",
+            "modelname": None,  # Replace with actual model name
+        },
+        "self.cabinet": {
+            "name": "cabinet",
+            "description": "The cabinet that needs to be opened.",
+            "modelname": "036_cabinet",
+        },
+    }
+}
+
+
 
 
 

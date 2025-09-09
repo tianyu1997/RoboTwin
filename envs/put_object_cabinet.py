@@ -88,11 +88,11 @@ class put_object_cabinet(Base_Task):
 
         # Grasp the object and grasp the drawer bar
         self.move(self.grasp_actor(self.object, arm_tag=arm_tag, pre_grasp_dis=0.1))
-        self.move(self.grasp_actor(self.cabinet, arm_tag=arm_tag.opposite, pre_grasp_dis=0.05))
+        self.move(self.grasp_actor(self.cabinet, arm_tag=arm_tag, pre_grasp_dis=0.05))
 
         # Pull the drawer
         for _ in range(4):
-            self.move(self.move_by_displacement(arm_tag=arm_tag.opposite, y=-0.04))
+            self.move(self.move_by_displacement(arm_tag=arm_tag, y=-0.04))
 
         # Lift the object
         self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.15))
