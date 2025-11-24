@@ -16,3 +16,4 @@ fi
 PYTHONWARNINGS=ignore::UserWarning \
 python script/collect_data.py $task_name $task_config
 rm -rf data/${task_name}/${task_config}/.cache
+echo "Data collection for ${task_name} with config ${task_config} completed."

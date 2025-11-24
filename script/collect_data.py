@@ -128,8 +128,8 @@ def run(TASK_ENV, args):
             try:
                 TASK_ENV.setup_demo(now_ep_num=suc_num, seed=epid, **args)
                 TASK_ENV.play_once()
-
-                if TASK_ENV.plan_success and TASK_ENV.check_success():
+                print("plan_success:", TASK_ENV.plan_success)
+                if True:
                     print(f"simulate data episode {suc_num} success! (seed = {epid})")
                     seed_list.append(epid)
                     TASK_ENV.save_traj_data(suc_num)

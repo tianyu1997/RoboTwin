@@ -27,6 +27,23 @@ class explore_cabinet(Base_Task):
             qw = float(np.cos(angle / 2.0))
             qxyz = (axis * np.sin(angle / 2.0)).astype(float)
             quat = [float(qxyz[0]), float(qxyz[1]), float(qxyz[2]), qw]
+            pose = self.get_arm_pose(arm_tag)
+
+            # quaternion multiply and normalize to apply rotation incrementally
+            def quat_mul(a, b):
+                a = np.asarray(a, dtype=float)
+                b = np.asarray(b, dtype=float)
+                ax, ay, az, aw = a
+                bx, by, bz, bw = b
+                x = aw * bx + ax * bw + ay * bz - az * by
+                y = aw * by - ax * bz + ay * bw + az * bx
+                z = aw * bz + ax * by - ay * bx + az * bw
+                w = aw * bw - ax * bx - ay * by - az * bz
+                return np.array([x, y, z, w], dtype=float)
+
+            # compose current orientation with the small rotation (incremental)
+            quat = quat_mul(pose[3:], quat)
+            quat = (quat / np.linalg.norm(quat)).tolist()
             self.move(self.move_by_displacement(arm_tag=arm_tag, x=dx, y=dy, z=dz, quat=quat))
 
     def load_actors(self):
@@ -37,7 +54,7 @@ class explore_cabinet(Base_Task):
             scene=self,
             modelname=self.model_name,
             modelid=self.model_id,
-            xlim=[-0.05, 0.05],
+            xlim=[-0.5, 0.5],
             ylim=[0.155, 0.155],
             rotate_rand=False,
             rotate_lim=[0, 0, np.pi / 16],
@@ -48,7 +65,6 @@ class explore_cabinet(Base_Task):
         # choose an object and place it inside the cabinet (use functional point 0 as base)
         object_list = [
             "047_mouse",
-            "048_stapler",
             "057_toycar",
             "073_rubikscube",
             "075_bread",
@@ -82,11 +98,10 @@ class explore_cabinet(Base_Task):
         # get a pose inside the cabinet's functional point and add a small random offset so object is inside
         func_pose = self.cabinet.get_functional_point(0, "pose")
         inside_p = np.array(func_pose.p)
+        inside_p[1] += 0.035  # move forward into the cabinet
+        inside_p[2] += 0.05  # lift slightly above the functional point plane
         # small random offset within the cabinet footprint
-        inside_p[0] += np.random.uniform(-0.03, 0.03)
-        inside_p[1] += np.random.uniform(-0.03, 0.03)
-        inside_p[2] += np.random.uniform(0.0, 0.03)
-        pose = sapien.Pose(inside_p, func_pose.q)
+        pose = sapien.Pose(inside_p, [0.707, 0.707, 0.0, 0.0])
 
         self.object = create_actor(
             scene=self,
@@ -115,43 +130,54 @@ class explore_cabinet(Base_Task):
 
     def play_once(self):
         # Determine which arm to use based on object's x coordinate
-        arm_tag = ArmTag('left')
+        arm_tag = ArmTag("right" if self.object.get_pose().p[0] > 0 else "left")
         self.arm_tag = arm_tag
         self.origin_z = self.object.get_pose().p[2]
 
         # n次: choose a random count (kept similar to previous range)
         n = np.random.randint(5, 10)
+        flag = 1
+        if arm_tag == 'left':
+            flag = -1
+        pose = self.get_arm_pose(arm_tag.opposite)
+        height = 1.25
+        self.move(self.move_to_pose(arm_tag=arm_tag, target_pose=[flag*0.35, -0.3, height] + list(pose[3:])))
+        self.move(self.move_to_pose(arm_tag=arm_tag, target_pose=[flag*0.5, 0.05, height] + list(pose[3:])))
+        self.move(self.move_to_pose(arm_tag=arm_tag.opposite, target_pose=[flag*-0.4, 0.05, height] + list(pose[3:])))
+        self.move(self.move_to_pose(arm_tag=arm_tag.opposite, target_pose=[flag*-0.4, -0.3, height] + list(pose[3:])))
+        self.move(self.move_to_pose(arm_tag=arm_tag.opposite, target_pose=[flag*-0.2, -0.3, height] + list(pose[3:])))
+        self.move(self.move_to_pose(arm_tag=arm_tag.opposite, target_pose=[flag*-0.2, 0.05, height] + list(pose[3:])))
+        cabinet = self.cabinet.get_contact_point(0, 'pose')
+        p = np.array(cabinet.p)
+        self.move(self.move_by_displacement(arm_tag=arm_tag , z=-0.2))
+        self.move(self.move_to_pose(arm_tag=arm_tag.opposite, target_pose=[p[0], p[1]-0.15, p[2]+0.5] + list(pose[3:])))
 
-        self.move(self.move_by_displacement(arm_tag=arm_tag , z=0.1))
+        
         # First: perform n small random displacements with optional small random rotation
-        self.rand_move(arm_tag=arm_tag, n=n)
+        # self.rand_move(arm_tag=arm_tag, n=n)
 
         # Grasp and open the cabinet (use opposite arm for the cabinet handle)
         self.move(self.grasp_actor(self.cabinet, arm_tag=arm_tag , pre_grasp_dis=0.05))
         # pull/open the cabinet by displacing the opposite arm in -y several small steps
         for _ in range(4):
-            self.move(self.move_by_displacement(arm_tag=arm_tag , y=-0.04))
+            self.move(self.move_by_displacement(arm_tag=arm_tag , y=-0.05))
 
         # release gripper using robot helper if available
-        try:
-            if str(arm_tag) == "left":
-                self.robot.open_left_gripper()
-            else:
-                self.robot.open_right_gripper()
-        except Exception:
-            # fallback to Base_Task open_gripper if robot methods are not present
-            self.open_gripper(arm_tag , pos=1.0)
+        
+        self.open_gripper(arm_tag , pos=1.0)
 
         for _ in range(2):
             self.move(self.move_by_displacement(arm_tag=arm_tag , y=-0.04))
 
+        
+
         # retreat to a safe / initial-like position: lift then move the arm away from the cabinet
-        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.15))
-        back_x = -0.25 if str(arm_tag) == "right" else 0.25
-        self.move(self.move_by_displacement(arm_tag=arm_tag, x=back_x, y=0.2))
+        # self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.15))
+        # back_x = -0.25
+        # self.move(self.move_by_displacement(arm_tag=arm_tag, x=back_x, y=0.2))
 
         # After opening, do another n small random displacements with small rotation
-        self.rand_move(arm_tag=arm_tag, n=n)
+        # self.rand_move(arm_tag=arm_tag, n=n)
 
         # populate info similarly to other tasks
         self.info["info"] = {

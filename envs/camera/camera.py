@@ -225,10 +225,10 @@ class Camera:
             near=near,
             far=far,
         )
-        observer_cam_pos = np.array([0.0, 0.23, 1.33])
-        observer_cam_forward = np.array([0, -1, -1.02])
+        observer_cam_pos = np.array([0.0, -0.4, 1.5])
+        observer_cam_forward = np.array([0, 1, -1.02])
         # observer_cam_left = np.array([1,-1, 0])
-        observer_cam_left = np.array([1, 0, 0])
+        observer_cam_left = np.array([-1, 0, 0])
         observer_up = np.cross(observer_cam_forward, observer_cam_left)
         observer_mat44 = np.eye(4)
         observer_mat44[:3, :3] = np.stack([observer_cam_forward, observer_cam_left, observer_up], axis=1)

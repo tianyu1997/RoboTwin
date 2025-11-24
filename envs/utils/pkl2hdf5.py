@@ -81,10 +81,76 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
     for pkl_file_path in pkl_files:
         pkl_file = load_pkl_file(pkl_file_path)
         append_data_to_structure(data_list, pkl_file)
+    
+    third_view_rgb = data_list.get("third_view_rgb", None)
+    endpose = data_list.get("endpose", {}).get("left_endpose", None)
+    if endpose is not None:
+        endpose = np.asarray(endpose)  # shape (N,7)
+
+    # unified overlay function for both single-view and stitched frames
+    def overlay_endpose(frames, endpose_arr):
+        if endpose_arr is None:
+            return np.array(frames)
+        frames = np.array(frames)
+        if frames.size == 0:
+            return frames
+        n_frames = frames.shape[0]
+        n_pose = endpose_arr.shape[0]
+        out = []
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.5
+        thickness = 1
+        padding = 6
+        for i in range(n_frames):
+            img = frames[i].copy()
+            # normalize/convert dtype to uint8
+            try:
+                img_max = img.max()
+            except Exception:
+                img_max = None
+            if img.dtype != np.uint8:
+                if img_max is not None and img_max <= 1.0:
+                    img = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+                else:
+                    img = img.astype(np.uint8)
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            pose = endpose_arr[min(i, n_pose - 1)]
+            lines = [f"{v:.3f}" for v in pose]
+            # compute box size
+            line_sizes = [cv2.getTextSize(line, font, scale, thickness)[0] for line in lines]
+            line_widths = [s[0] for s in line_sizes]
+            line_heights = [s[1] for s in line_sizes]
+            box_w = max(line_widths) + padding * 2
+            box_h = sum(line_heights) + (len(lines)-1)*4 + padding * 2
+            h, w = img.shape[:2]
+            x0 = max(5, w - box_w - 5)
+            y0 = 5
+            cv2.rectangle(img, (x0, y0), (x0 + box_w, y0 + box_h), (0, 0, 0), -1)
+            y = y0 + padding + line_heights[0]
+            for idx, line in enumerate(lines):
+                cv2.putText(img, line, (x0 + padding, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+                if idx + 1 < len(lines):
+                    y += line_heights[idx+1] + 4
+            out.append(img)
+        return np.array(out)
+
+    if third_view_rgb is not None:
+        # 与 112-160 行保存方式一致：在相同目录、相同扩展名下生成带后缀的文件名，并确保目录存在
+        base, ext = os.path.splitext(video_path)
+        if not ext:
+            ext = ".mp4"
+        third_video_path = f"{base}_third_view{ext}"
+        out_dir = os.path.dirname(third_video_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        third_frames = np.array(third_view_rgb)
+        third_frames = overlay_endpose(third_frames, endpose)
+        images_to_video(third_frames, out_path=third_video_path)
 
     # Prepare stitched video from multiple camera views (left, right, head).
     obs = data_list.get("observation", {})
-    pprint(obs)
     cam_names = ["head_camera", "left_camera", "right_camera"]
     # Collect rgb lists for available cameras
     cam_frames = {}
@@ -96,7 +162,9 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
 
     if not cam_frames:
         # Fallback to previous behavior: try left camera path and let errors surface if missing
-        images_to_video(np.array(data_list["observation"]["left_camera"]["rgb"]), out_path=video_path)
+        left_frames = np.array(data_list["observation"]["left_camera"]["rgb"])
+        left_frames = overlay_endpose(left_frames, endpose)
+        images_to_video(left_frames, out_path=video_path)
     else:
         # Ensure all collected cameras have the same number of frames and same HWC shapes
         # Find minimal common length to avoid index errors
@@ -119,9 +187,7 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
             except Exception:
                 # If concat fails due to mismatched heights, resize to smallest height
                 heights = [f.shape[0] for f in frames]
-                widths = [f.shape[1] for f in frames]
                 min_h = min(heights)
-                # resize each frame to min_h using simple crop or cv2.resize
                 resized = []
                 for f in frames:
                     if f.shape[0] != min_h:
@@ -133,6 +199,7 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
             stitched.append(stitched_frame)
 
         stitched_arr = np.array(stitched)
+        stitched_arr = overlay_endpose(stitched_arr, endpose)
         images_to_video(stitched_arr, out_path=video_path)
 
     with h5py.File(hdf5_path, "w") as f:

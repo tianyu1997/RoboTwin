@@ -666,6 +666,4 @@ def create_sapien_urdf_obj(
             model_data["extents"] = (np.array(bounding_box["max"]) - np.array(bounding_box["min"])).tolist()
     object.set_name(modelname)
     actor = ArticulationActor(object, model_data)
-    if hasattr(scene_orig, 'actors'):
-        scene_orig.actors.append(actor)
     return actor
