@@ -1,16 +1,15 @@
 import sys
 
 sys.path.append("./")
+import warnings
+# Silence torchvision video I/O deprecation warning (explicit, before other imports)
+warnings.filterwarnings("ignore", message=r".*video I/O is deprecated.*", category=UserWarning)
 
-import sapien.core as sapien
-from sapien.render import clear_cache
-from collections import OrderedDict
-import pdb
+
 from envs import *
 import yaml
 import importlib
 import json
-import traceback
 import os
 import time
 from argparse import ArgumentParser

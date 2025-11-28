@@ -136,7 +136,6 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
         return np.array(out)
 
     if third_view_rgb is not None:
-        # 与 112-160 行保存方式一致：在相同目录、相同扩展名下生成带后缀的文件名，并确保目录存在
         base, ext = os.path.splitext(video_path)
         if not ext:
             ext = ".mp4"

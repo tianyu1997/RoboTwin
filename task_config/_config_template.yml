@@ -23,7 +23,7 @@ data_type:
   third_view: false
   depth: false
   pointcloud: false
-  endpose: true
+  endpose: true 
   qpos: true
   mesh_segmentation: false
   actor_segmentation: false
@@ -33,3 +33,4 @@ save_path: ./data
 clear_cache_freq: 1
 collect_data: true
 eval_video_log: true
+
