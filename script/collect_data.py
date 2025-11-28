@@ -19,7 +19,7 @@ parent_directory = os.path.dirname(current_file_path)
 
 
 def class_decorator(task_name):
-    envs_module = importlib.import_module(f"envs.{task_name}")
+    envs_module = importlib.import_module(f"envs.tasks.{task_name}")
     try:
         env_class = getattr(envs_module, task_name)
         env_instance = env_class()
