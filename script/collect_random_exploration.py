@@ -2,34 +2,50 @@
 """
 Random Exploration Data Collection for Visual-Action Jacobian Learning
 
-This script collects training data for visual-action Jacobian models:
-- Ensures s(t+1) = s(t) + a(t) relationship
-- Supports multiple control modes (delta_qpos, delta_ee, delta_ee_pos)
-- Cross-embodiment data collection
-- Saves data in formats suitable for Jacobian training
+Fast and efficient collection with:
+- Random embodiment switching
+- Random control mode switching  
+- No pre-search for stable seeds (retry on-the-fly)
+- Images + states + actions saved together
 
 Data Format:
     Each transition contains:
     - state_t: robot state at time t
     - action: delta action a(t)
     - state_t1: robot state at time t+1
-    - actual_delta: s(t+1) - s(t)
-    - images: visual observations at time t
+    - images: visual observations at time t (head_rgb, left_wrist_rgb, right_wrist_rgb)
     - robot_info: embodiment information
 
 Usage:
-    # Collect with joint space control
-    python collect_random_exploration.py --control_mode delta_qpos
+    # Collect with random embodiment and control mode
+    python collect_random_exploration.py --random_embodiment --random_control_mode
     
-    # Collect with end-effector control
-    python collect_random_exploration.py --control_mode delta_ee
-    
-    # Multi-embodiment collection
-    python collect_random_exploration.py --random_embodiment --num_episodes 1000
+    # Fast collection with no objects (for testing)
+    python collect_random_exploration.py --num_objects 0 --num_episodes 10
 """
 
 import sys
 import os
+import warnings
+import logging
+import traceback
+
+# Setup logging with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# Suppress CuRobo JIT compilation warnings
+logging.getLogger("curobo").setLevel(logging.ERROR)
+logging.getLogger("torch.utils.cpp_extension").setLevel(logging.ERROR)
+
+# Suppress some warnings before importing torch
+warnings.filterwarnings('ignore', message='.*TORCH_CUDA_ARCH_LIST.*')
+warnings.filterwarnings('ignore', message='.*pkg_resources.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='torch.utils.cpp_extension')
 
 # Add RoboTwin root to path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -41,87 +57,114 @@ import yaml
 import json
 import time
 import h5py
-import pickle
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Collect Visual-Action Jacobian Training Data",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    # Basic collection with joint space control
-    python collect_random_exploration.py --num_episodes 100
-    
-    # End-effector control mode
-    python collect_random_exploration.py --control_mode delta_ee
-    
-    # Multi-embodiment with larger action deltas
-    python collect_random_exploration.py --random_embodiment --delta_qpos_scale 0.1
-        """
-    )
+    parser = argparse.ArgumentParser(description="Collect Visual-Action Jacobian Training Data")
     
     # Basic settings
-    parser.add_argument("--config", type=str, default="random_exploration",
-                       help="Config file name (without .yml)")
-    parser.add_argument("--num_episodes", type=int, default=100,
-                       help="Number of episodes to collect")
-    parser.add_argument("--steps_per_episode", type=int, default=50,
-                       help="Random steps per episode")
-    parser.add_argument("--num_objects", type=int, default=5,
-                       help="Number of random objects per scene")
+    parser.add_argument("--config", type=str, default="random_exploration")
+    parser.add_argument("--num_episodes", type=int, default=100)
+    parser.add_argument("--steps_per_episode", type=int, default=50)
+    parser.add_argument("--num_objects", type=int, default=3)
     
-    # Control mode settings (for Jacobian learning)
+    # Control mode settings
     parser.add_argument("--control_mode", type=str, default="delta_qpos",
-                       choices=["delta_qpos", "delta_ee", "delta_ee_pos"],
-                       help="Control mode: delta_qpos (joint), delta_ee (full EE), delta_ee_pos (EE position only)")
-    parser.add_argument("--delta_qpos_scale", type=float, default=0.05,
-                       help="Scale for joint position deltas (radians)")
-    parser.add_argument("--delta_ee_pos_scale", type=float, default=0.02,
-                       help="Scale for EE position deltas (meters)")
-    parser.add_argument("--delta_ee_rot_scale", type=float, default=0.05,
-                       help="Scale for EE rotation deltas (radians)")
-    parser.add_argument("--gripper_action_prob", type=float, default=0.1,
-                       help="Probability of gripper action per step")
+                       choices=["delta_qpos", "delta_ee", "delta_ee_pos"])
+    parser.add_argument("--random_control_mode", action="store_true",
+                       help="Randomly select control mode each episode")
+    parser.add_argument("--delta_qpos_scale", type=float, default=0.05)
+    parser.add_argument("--delta_ee_pos_scale", type=float, default=0.02)
+    parser.add_argument("--delta_ee_rot_scale", type=float, default=0.05)
+    parser.add_argument("--gripper_action_prob", type=float, default=0.1)
     
     # Embodiment settings
     parser.add_argument("--random_embodiment", action="store_true",
                        help="Randomly select robot embodiment each episode")
     parser.add_argument("--embodiment", type=str, default="franka-panda",
+                       choices=["franka-panda", "aloha-agilex", "ARX-X5", "piper", "ur5-wsg"],
                        help="Fixed embodiment type (if not random)")
+    parser.add_argument("--embodiment_list", type=str, nargs="+", default=None,
+                       help="List of embodiments to randomly sample from (overrides --embodiment)")
+    parser.add_argument("--uniform_embodiment", action="store_true",
+                       help="Use uniform sampling instead of weighted for random embodiment")
+    parser.add_argument("--episodes_per_robot", type=int, default=5,
+                       help="Number of episodes to collect per robot before switching (reduces robot loading overhead)")
     
-    # Randomization and retry settings
-    parser.add_argument("--seed", type=int, default=None,
-                       help="Random seed (default: use time-based)")
-    parser.add_argument("--max_seed_retries", type=int, default=50,
-                       help="Maximum seed retries per episode for stability")
+    # Retry settings
+    parser.add_argument("--max_retries", type=int, default=10,
+                       help="Max retries per episode on error")
     
     # Output
-    parser.add_argument("--save_path", type=str, default="./data/jacobian_data",
-                       help="Path to save collected data")
-    parser.add_argument("--save_format", type=str, default="hdf5",
-                       choices=["hdf5", "pkl", "both"],
-                       help="Format to save data")
-    parser.add_argument("--render", action="store_true",
-                       help="Enable rendering for visualization")
+    parser.add_argument("--save_path", type=str, default="./data/jacobian_data")
+    parser.add_argument("--render", action="store_true")
+    
+    # Rendering optimization options
+    parser.add_argument("--render_mode", type=str, default="rt",
+                       choices=["rt", "rasterize"],
+                       help="Render mode: 'rt' for ray-tracing (quality), 'rasterize' for speed")
+    parser.add_argument("--rt_samples", type=int, default=32,
+                       help="Ray tracing samples per pixel (lower=faster but noisier)")
+    parser.add_argument("--rt_denoiser", type=str, default="oidn",
+                       choices=["oidn", "none"],
+                       help="Denoiser: 'oidn' for quality, 'none' for speed")
+    
+    # Verbosity
+    parser.add_argument("-v", "--verbose", action="store_true",
+                       help="Enable verbose logging (show setup details)")
     
     return parser.parse_args()
 
 
-def get_random_embodiment():
-    """Randomly select a robot embodiment."""
-    embodiments = [
-        ["franka-panda", "franka-panda", 0.6],
-        # Uncomment as more embodiments become available:
-        # ["aloha-agilex", "aloha-agilex", 0.5],
-        # ["ARX-X5", "ARX-X5", 0.5],
-        # ["piper", "piper", 0.5],
-    ]
-    return embodiments[np.random.randint(len(embodiments))]
+# Available embodiments with their arm distance configurations
+# Format: [left_robot, right_robot, arm_distance]
+EMBODIMENTS = [
+    ["franka-panda", "franka-panda", 0.6],      # 7 DOF, Franka Emika Panda
+    ["aloha-agilex", "aloha-agilex", 0.5],      # 6 DOF, ALOHA AgileX
+    ["ARX-X5", "ARX-X5", 0.5],                  # 6 DOF, ARX X5
+    ["piper", "piper", 0.5],                    # 6 DOF, Piper
+    ["ur5-wsg", "ur5-wsg", 0.6],                # 6 DOF, UR5 with WSG gripper
+]
+
+# Embodiments that support EE (end-effector) control via IK
+# Others only support delta_qpos mode
+EMBODIMENTS_WITH_EE_SUPPORT = {"franka-panda", "ARX-X5", "piper", "ur5-wsg"}
+
+# Embodiment weights (can adjust based on data balance needs)
+EMBODIMENT_WEIGHTS = [0.25, 0.15, 0.2, 0.2, 0.2]  # Slightly less aloha since it's qpos-only
+
+CONTROL_MODES = ["delta_qpos", "delta_ee", "delta_ee_pos"]
+CONTROL_MODES_QPOS_ONLY = ["delta_qpos"]  # For embodiments without IK support
+
+
+def get_random_embodiment(weighted: bool = True):
+    """Randomly select a robot embodiment.
+    
+    Args:
+        weighted: If True, use weighted sampling; otherwise uniform.
+    """
+    if weighted:
+        idx = np.random.choice(len(EMBODIMENTS), p=EMBODIMENT_WEIGHTS)
+    else:
+        idx = np.random.randint(len(EMBODIMENTS))
+    return EMBODIMENTS[idx]
+
+
+def get_random_control_mode(embodiment_name: str = None):
+    """Randomly select a control mode compatible with the embodiment.
+    
+    Args:
+        embodiment_name: If provided, select mode compatible with this embodiment.
+    """
+    if embodiment_name and embodiment_name not in EMBODIMENTS_WITH_EE_SUPPORT:
+        # This embodiment only supports qpos control
+        return np.random.choice(CONTROL_MODES_QPOS_ONLY)
+    else:
+        return np.random.choice(CONTROL_MODES)
 
 
 def load_config(config_name: str, args) -> dict:
@@ -135,7 +178,6 @@ def load_config(config_name: str, args) -> dict:
     config["episode_num"] = args.num_episodes
     config["num_random_steps"] = args.steps_per_episode
     config["num_objects"] = args.num_objects
-    config["control_mode"] = args.control_mode
     config["delta_qpos_scale"] = args.delta_qpos_scale
     config["delta_ee_pos_scale"] = args.delta_ee_pos_scale
     config["delta_ee_rot_scale"] = args.delta_ee_rot_scale
@@ -143,10 +185,10 @@ def load_config(config_name: str, args) -> dict:
     config["save_path"] = args.save_path
     config["render_freq"] = 10 if args.render else 0
     
-    if args.random_embodiment:
-        config["embodiment"] = get_random_embodiment()
-    elif args.embodiment:
-        config["embodiment"] = [args.embodiment, args.embodiment, 0.6]
+    # Rendering optimization
+    config["render_mode"] = args.render_mode
+    config["rt_samples"] = args.rt_samples
+    config["rt_denoiser"] = args.rt_denoiser
     
     return config
 
@@ -190,62 +232,57 @@ def setup_embodiment(config: dict) -> dict:
     return config
 
 
-def save_jacobian_data_hdf5(save_path: Path, episode_idx: int, 
-                            jacobian_data: Dict[str, Any], config: dict):
-    """Save Jacobian training data to HDF5 format."""
+def save_episode_hdf5(save_path: Path, episode_idx: int, 
+                      jacobian_data: Dict[str, Any], 
+                      embodiment_name: str, control_mode: str):
+    """Save episode data to HDF5 with images and complete dimension info."""
     filename = save_path / f"episode_{episode_idx:06d}.h5"
     
     with h5py.File(filename, 'w') as f:
-        # Create groups
-        states_grp = f.create_group('states')
-        actions_grp = f.create_group('actions')
+        # States and actions
+        f.create_dataset('states_t', data=jacobian_data['states_t'], compression='gzip')
+        f.create_dataset('states_t1', data=jacobian_data['states_t1'], compression='gzip')
+        f.create_dataset('actions', data=jacobian_data['actions'], compression='gzip')
+        f.create_dataset('actual_deltas', data=jacobian_data['actual_deltas'], compression='gzip')
+        
+        # Images - save each camera view
         images_grp = f.create_group('images')
-        meta_grp = f.create_group('metadata')
-        
-        # Save state arrays
-        states_grp.create_dataset('state_t', data=jacobian_data['states_t'], 
-                                   compression='gzip')
-        states_grp.create_dataset('state_t1', data=jacobian_data['states_t1'],
-                                   compression='gzip')
-        states_grp.create_dataset('actual_delta', data=jacobian_data['actual_deltas'],
-                                   compression='gzip')
-        
-        # Save actions
-        actions_grp.create_dataset('delta_action', data=jacobian_data['actions'],
-                                    compression='gzip')
-        
-        # Save images
         for img_key, img_data in jacobian_data.get('images', {}).items():
             if img_data is not None and len(img_data) > 0:
-                images_grp.create_dataset(img_key, data=img_data, compression='gzip')
+                # Use chunked storage for images (better for random access)
+                images_grp.create_dataset(
+                    img_key, data=img_data, 
+                    compression='gzip', compression_opts=4,
+                    chunks=(1,) + img_data.shape[1:]  # chunk per frame
+                )
         
-        # Save metadata
-        meta_grp.attrs['control_mode'] = jacobian_data['control_mode']
-        meta_grp.attrs['episode_idx'] = episode_idx
-        meta_grp.attrs['num_transitions'] = len(jacobian_data['states_t'])
+        # Metadata - basic info (encode strings for HDF5 compatibility)
+        f.attrs['control_mode'] = np.bytes_(control_mode)
+        f.attrs['embodiment'] = np.bytes_(embodiment_name)
+        f.attrs['episode_idx'] = episode_idx
+        f.attrs['num_transitions'] = len(jacobian_data['states_t'])
         
-        robot_info = jacobian_data['robot_info']
-        meta_grp.attrs['embodiment'] = robot_info.get('embodiment', 'unknown')
-        meta_grp.attrs['left_arm_dof'] = robot_info.get('left_arm_dof', 7)
-        meta_grp.attrs['right_arm_dof'] = robot_info.get('right_arm_dof', 7)
+        # Metadata - dimension info (important for cross-embodiment, cross-mode training)
+        robot_info = jacobian_data.get('robot_info', {})
+        f.attrs['left_arm_dof'] = robot_info.get('left_arm_dof', 7)
+        f.attrs['right_arm_dof'] = robot_info.get('right_arm_dof', 7)
+        f.attrs['state_dim'] = jacobian_data['states_t'].shape[1]
+        f.attrs['action_dim'] = jacobian_data['actions'].shape[1]
         
-        # Save joint limits
-        limits = robot_info.get('arm_joint_limits', {})
-        if limits:
-            limits_grp = meta_grp.create_group('joint_limits')
-            for k, v in limits.items():
-                limits_grp.create_dataset(k, data=v)
-    
-    return filename
-
-
-def save_jacobian_data_pkl(save_path: Path, episode_idx: int,
-                           jacobian_data: Dict[str, Any], config: dict):
-    """Save Jacobian training data to pickle format."""
-    filename = save_path / f"episode_{episode_idx:06d}.pkl"
-    
-    with open(filename, 'wb') as f:
-        pickle.dump(jacobian_data, f)
+        # Save dimension breakdown for easier parsing
+        # Format depends on control_mode:
+        # - delta_qpos: [left_qpos(N), left_grip(1), right_qpos(N), right_grip(1)]
+        # - delta_ee_pos: [left_pos(3), left_grip(1), right_pos(3), right_grip(1)]
+        # - delta_ee: [left_pos(3), left_quat(4), left_grip(1), right_pos(3), right_quat(4), right_grip(1)]
+        left_dof = robot_info.get('left_arm_dof', 7)
+        right_dof = robot_info.get('right_arm_dof', 7)
+        
+        if control_mode == 'delta_qpos':
+            f.attrs['dim_breakdown'] = np.bytes_(f"left_qpos:{left_dof},left_grip:1,right_qpos:{right_dof},right_grip:1")
+        elif control_mode == 'delta_ee_pos':
+            f.attrs['dim_breakdown'] = np.bytes_("left_pos:3,left_grip:1,right_pos:3,right_grip:1")
+        elif control_mode == 'delta_ee':
+            f.attrs['dim_breakdown'] = np.bytes_("left_pos:3,left_quat:4,left_grip:1,right_pos:3,right_quat:4,right_grip:1")
     
     return filename
 
@@ -253,56 +290,61 @@ def save_jacobian_data_pkl(save_path: Path, episode_idx: int,
 def main():
     args = parse_args()
     
+    # Set logging level based on verbose flag
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("envs._base_task").setLevel(logging.DEBUG)
+    
     # Set random seed
-    if args.seed is not None:
-        np.random.seed(args.seed)
-    else:
-        np.random.seed(int(time.time()) % 2**32)
+    np.random.seed(int(time.time()) % 2**32)
     
     # Setup multiprocessing
     import torch.multiprocessing as mp
     mp.set_start_method("spawn", force=True)
     
-    # Load configuration
-    config = load_config(args.config, args)
-    config = setup_embodiment(config)
-    config["task_name"] = "random_exploration"
-    
     # Create save directory
-    save_path = Path(config["save_path"])
+    save_path = Path(args.save_path)
     save_path.mkdir(parents=True, exist_ok=True)
+    
+    # Determine embodiment list for logging
+    if args.random_embodiment:
+        if args.embodiment_list:
+            embodiment_list = args.embodiment_list
+        else:
+            embodiment_list = [e[0] for e in EMBODIMENTS]
+    else:
+        embodiment_list = [args.embodiment]
     
     # Save collection config
     collection_config = {
-        "control_mode": args.control_mode,
         "num_episodes": args.num_episodes,
         "steps_per_episode": args.steps_per_episode,
-        "delta_qpos_scale": args.delta_qpos_scale,
-        "delta_ee_pos_scale": args.delta_ee_pos_scale,
-        "delta_ee_rot_scale": args.delta_ee_rot_scale,
-        "gripper_action_prob": args.gripper_action_prob,
+        "num_objects": args.num_objects,
         "random_embodiment": args.random_embodiment,
+        "embodiment_list": embodiment_list,
+        "uniform_embodiment": args.uniform_embodiment if args.random_embodiment else None,
+        "random_control_mode": args.random_control_mode,
+        "control_mode": args.control_mode if not args.random_control_mode else "random",
         "timestamp": datetime.now().isoformat(),
     }
-    
     with open(save_path / "collection_config.json", "w") as f:
         json.dump(collection_config, f, indent=2)
     
-    print("\n" + "=" * 70)
-    print("Visual-Action Jacobian Data Collection")
-    print("=" * 70)
-    print(f"Control Mode: {args.control_mode}")
-    print(f"  -> Data format: s(t+1) = s(t) + a(t)")
-    print(f"Episodes: {args.num_episodes}")
-    print(f"Steps per episode: {args.steps_per_episode}")
-    print(f"Objects per scene: {args.num_objects}")
-    print(f"Random embodiment: {args.random_embodiment}")
-    print(f"Save path: {save_path}")
-    print(f"Save format: {args.save_format}")
-    print(f"Max seed retries: {args.max_seed_retries}")
+    logger.info(f"Episodes: {args.num_episodes}")
+    logger.info(f"Steps per episode: {args.steps_per_episode}")
+    logger.info(f"Objects per scene: {args.num_objects}")
+    logger.info(f"Random embodiment: {args.random_embodiment}")
+    if args.random_embodiment:
+        logger.info(f"  Embodiments: {embodiment_list}")
+        logger.info(f"  Uniform sampling: {args.uniform_embodiment}")
+        logger.info(f"  Episodes per robot: {args.episodes_per_robot}")
+    else:
+        logger.info(f"  Fixed embodiment: {args.embodiment}")
+    logger.info(f"Random control mode: {args.random_control_mode}")
+    logger.info(f"Save path: {save_path}")
     print("=" * 70 + "\n")
     
-    # Import task and UnStableError
+    # Import task
     from envs.tasks import random_exploration
     from envs.utils.create_actor import UnStableError
     
@@ -311,163 +353,210 @@ def main():
     failed_episodes = 0
     total_transitions = 0
     embodiment_counts = {}
+    control_mode_counts = {}
     
-    # Phase 1: Collect stable seeds
-    print("Phase 1: Finding stable seeds...")
-    stable_seeds = []
-    seed_attempts = 0
-    base_seed = args.seed if args.seed else int(time.time()) % 2**32
+    episode_idx = 0
+    seed_counter = int(time.time()) % 2**32
+    episodes_with_current_robot = 0
+    current_embodiment = None
+    current_embodiment_name = None
+    current_task = None  # Reusable task object
     
-    while len(stable_seeds) < args.num_episodes and seed_attempts < args.num_episodes * args.max_seed_retries:
-        test_seed = base_seed + seed_attempts
-        seed_attempts += 1
+    while successful_episodes < args.num_episodes:
+        # Select embodiment - only change when needed
+        need_new_robot = (current_embodiment is None or 
+                         (args.random_embodiment and episodes_with_current_robot >= args.episodes_per_robot))
         
-        # Optionally randomize embodiment
-        if args.random_embodiment:
-            config["embodiment"] = get_random_embodiment()
-            config = setup_embodiment(config)
-        
-        task = None
-        try:
-            task = random_exploration()
-            config["seed"] = test_seed
-            config["now_ep_num"] = len(stable_seeds)
-            config["save_data"] = False
-            
-            task.setup_demo(**config)
-            
-            # If we get here, the scene is stable
-            stable_seeds.append(test_seed)
-            print(f"  Found stable seed {len(stable_seeds)}/{args.num_episodes}: {test_seed}")
-            
-            task.close_env()
-            if config["render_freq"] > 0 and hasattr(task, 'viewer') and task.viewer:
-                task.viewer.close()
-                
-        except UnStableError as e:
-            # Unstable - try next seed
-            if task is not None:
+        if need_new_robot:
+            # Close previous task if exists
+            if current_task is not None:
                 try:
-                    task.close_env()
-                    if config["render_freq"] > 0 and hasattr(task, 'viewer') and task.viewer:
-                        task.viewer.close()
+                    current_task.close_env()
                 except:
                     pass
-            continue
-        except Exception as e:
-            print(f"  Error testing seed {test_seed}: {e}")
-            if task is not None:
-                try:
-                    task.close_env()
-                except:
-                    pass
-            continue
-    
-    print(f"Found {len(stable_seeds)} stable seeds after {seed_attempts} attempts\n")
-    
-    if len(stable_seeds) == 0:
-        print("ERROR: Could not find any stable seeds!")
-        return
-    
-    # Phase 2: Collect data with stable seeds
-    print("Phase 2: Collecting data...")
-    
-    for episode_idx, episode_seed in enumerate(stable_seeds):
-        task = None
-        try:
-            # Optionally randomize embodiment each episode
+                current_task = None
+            
+            episodes_with_current_robot = 0
             if args.random_embodiment:
-                config["embodiment"] = get_random_embodiment()
-                config = setup_embodiment(config)
-            
-            task = random_exploration()
-            config["seed"] = episode_seed
-            config["now_ep_num"] = episode_idx
-            config["save_data"] = False
-            
-            task.setup_demo(**config)
-            
-            # Run exploration
-            info = task.play_once()
-            
-            # Check success and get data
-            if task.check_success():
-                successful_episodes += 1
-                
-                # Get Jacobian training data
-                jacobian_data = task.get_jacobian_training_data()
-                num_transitions = len(jacobian_data.get('states_t', []))
-                total_transitions += num_transitions
-                
-                # Track embodiment distribution
-                emb = jacobian_data['robot_info'].get('embodiment', 'unknown')
-                embodiment_counts[emb] = embodiment_counts.get(emb, 0) + 1
-                
-                # Save data
-                if args.save_format in ['hdf5', 'both']:
-                    save_jacobian_data_hdf5(save_path, episode_idx, jacobian_data, config)
-                if args.save_format in ['pkl', 'both']:
-                    save_jacobian_data_pkl(save_path, episode_idx, jacobian_data, config)
-                
-                # Verify s(t+1) = s(t) + a(t) relationship
-                reconstruction_error = np.mean(np.abs(
-                    jacobian_data['states_t'] + jacobian_data['actions'] - jacobian_data['states_t1']
-                ))
-                actual_delta_vs_action = np.mean(np.abs(
-                    jacobian_data['actual_deltas'] - jacobian_data['actions']
-                ))
-                
-                print(f"Ep {episode_idx + 1:4d}/{len(stable_seeds)}: "
-                      f"OK - {num_transitions} trans, "
-                      f"recon_err={reconstruction_error:.6f}, "
-                      f"delta_diff={actual_delta_vs_action:.6f}")
+                if args.embodiment_list:
+                    emb_name = np.random.choice(args.embodiment_list)
+                    emb_configs = {e[0]: e for e in EMBODIMENTS}
+                    if emb_name in emb_configs:
+                        current_embodiment = emb_configs[emb_name]
+                    else:
+                        current_embodiment = [emb_name, emb_name, 0.5]
+                else:
+                    current_embodiment = get_random_embodiment(weighted=not args.uniform_embodiment)
             else:
-                failed_episodes += 1
-                print(f"Ep {episode_idx + 1:4d}/{len(stable_seeds)}: FAILED (exploration incomplete)")
-            
-            # Cleanup
-            task.close_env(clear_cache=(episode_idx % 10 == 0))
-            if config["render_freq"] > 0 and hasattr(task, 'viewer') and task.viewer:
-                task.viewer.close()
+                current_embodiment = [args.embodiment, args.embodiment, 0.6]
+            current_embodiment_name = current_embodiment[0]
+            logger.info(f"--- Switching to robot: {current_embodiment_name} (will collect {args.episodes_per_robot} episodes) ---")
+        
+        embodiment = current_embodiment
+        embodiment_name = current_embodiment_name
+        
+        # Select control mode for this episode (must be after embodiment selection)
+        if args.random_control_mode:
+            control_mode = get_random_control_mode(embodiment_name)
+        else:
+            # Check if fixed control mode is compatible with this embodiment
+            if args.control_mode in ['delta_ee', 'delta_ee_pos'] and embodiment_name not in EMBODIMENTS_WITH_EE_SUPPORT:
+                logger.warning(f"  {embodiment_name} doesn't support {args.control_mode}, using delta_qpos")
+                control_mode = 'delta_qpos'
+            else:
+                control_mode = args.control_mode
+        
+        retry_count = 0
+        
+        while retry_count < args.max_retries:
+            current_stage = "init"
+            try:
+                # First episode with this robot OR task was closed due to error
+                if current_task is None:
+                    # Load fresh config
+                    config = load_config(args.config, args)
+                    config["embodiment"] = embodiment
+                    config["control_mode"] = control_mode
+                    config = setup_embodiment(config)
+                    config["task_name"] = "random_exploration"
+                    config["seed"] = seed_counter
+                    config["now_ep_num"] = episode_idx
+                    config["save_data"] = False
+                    
+                    seed_counter += 1
+                    
+                    # Create new task with full setup
+                    current_stage = "create_task"
+                    logger.debug(f"  [{embodiment_name}] Creating task...")
+                    current_task = random_exploration()
+                    
+                    current_stage = "setup_demo"
+                    logger.info(f"  [{embodiment_name}] Setting up scene with {args.num_objects} objects...")
+                    current_task.setup_demo(**config)
+                else:
+                    # Reuse existing task - just reset scene
+                    current_stage = "reset_scene"
+                    logger.info(f"  [{embodiment_name}] Resetting scene (reusing robot)...")
+                    current_task.control_mode = control_mode  # Update control mode
+                    current_task.reset_for_new_episode(seed=seed_counter)
+                    seed_counter += 1
                 
-        except Exception as e:
+                # Run exploration
+                current_stage = "play_once"
+                info = current_task.play_once()
+                
+                # Check success
+                current_stage = "check_success"
+                if current_task.check_success():
+                    # Get data with images
+                    current_stage = "get_jacobian_data"
+                    jacobian_data = current_task.get_jacobian_training_data()
+                    
+                    if jacobian_data is None:
+                        logger.warning(f"  get_jacobian_training_data() returned None")
+                        retry_count += 1
+                        continue
+                    
+                    num_transitions = len(jacobian_data.get('states_t', []))
+                    
+                    if num_transitions > 0:
+                        # Save episode
+                        save_episode_hdf5(save_path, successful_episodes, 
+                                         jacobian_data, embodiment_name, control_mode)
+                        
+                        successful_episodes += 1
+                        total_transitions += num_transitions
+                        embodiment_counts[embodiment_name] = embodiment_counts.get(embodiment_name, 0) + 1
+                        control_mode_counts[control_mode] = control_mode_counts.get(control_mode, 0) + 1
+                        episodes_with_current_robot += 1
+                        
+                        # Verify Jacobian relationship
+                        recon_err = np.mean(np.abs(
+                            jacobian_data['states_t'] + jacobian_data['actions'] - jacobian_data['states_t1']
+                        ))
+                        
+                        # Count images
+                        num_images = sum(len(v) for v in jacobian_data.get('images', {}).values())
+                        
+                        logger.info(f"Ep {successful_episodes:4d}/{args.num_episodes}: "
+                              f"{embodiment_name[:12]:12s} | {control_mode:12s} | "
+                              f"{num_transitions} trans | {num_images} imgs | "
+                              f"recon_err={recon_err:.4f}")
+                        
+                        # Don't close task - keep for reuse!
+                        break
+                    else:
+                        logger.warning(f"  No transitions recorded, retrying (retry {retry_count+1}/{args.max_retries})...")
+                        retry_count += 1
+                else:
+                    logger.warning(f"  Episode failed success check, retrying (retry {retry_count+1}/{args.max_retries})...")
+                    retry_count += 1
+                
+                seed_counter += 1
+                
+            except UnStableError as e:
+                # Scene unstable, try different seed
+                logger.debug(f"  UnStableError at stage '{current_stage}': {e}")
+                seed_counter += 1
+                retry_count += 1
+                continue
+                
+            except Exception as e:
+                # Log detailed error with traceback
+                error_msg = f"Episode {episode_idx}, retry {retry_count+1}/{args.max_retries}"
+                logger.error(f"  [{error_msg}] Error at stage '{current_stage}': {type(e).__name__}: {e}")
+                
+                # Print traceback for debugging (only first occurrence per episode)
+                if retry_count == 0:
+                    logger.error(f"  Traceback:\n{traceback.format_exc()}")
+                
+                # On error, close and recreate task
+                if current_task is not None:
+                    try:
+                        current_task.close_env()
+                    except:
+                        pass
+                    current_task = None
+                
+                retry_count += 1
+                seed_counter += 1
+                continue
+        
+        if retry_count >= args.max_retries:
             failed_episodes += 1
-            print(f"Ep {episode_idx + 1:4d}/{len(stable_seeds)}: ERROR - {e}")
-            import traceback
-            traceback.print_exc()
-            
-            if task is not None:
-                try:
-                    task.close_env()
-                    if config["render_freq"] > 0 and hasattr(task, 'viewer') and task.viewer:
-                        task.viewer.close()
-                except:
-                    pass
+            logger.warning(f"  FAILED episode {episode_idx} after {args.max_retries} retries (last stage: {current_stage})")
+        
+        episode_idx += 1
+        
+        # Progress update every 10 episodes
+        if episode_idx % 10 == 0:
+            logger.info(f"--- Progress: {successful_episodes}/{args.num_episodes} episodes, "
+                  f"{total_transitions} total transitions ---")
     
-    # Summary statistics
-    avg_seed_attempts = seed_attempts / max(1, len(stable_seeds))
+    # Summary
     print("\n" + "=" * 70)
     print("Collection Complete")
     print("=" * 70)
-    print(f"Stable seeds found: {len(stable_seeds)}/{args.num_episodes}")
-    print(f"Seed attempts: {seed_attempts} (avg {avg_seed_attempts:.1f} per episode)")
-    print(f"Successful episodes: {successful_episodes}/{len(stable_seeds)}")
-    print(f"Failed episodes: {failed_episodes}")
-    print(f"Total transitions: {total_transitions}")
-    print(f"Avg transitions/episode: {total_transitions / max(1, successful_episodes):.1f}")
-    print(f"\nEmbodiment distribution:")
+    logger.info(f"Successful episodes: {successful_episodes}/{args.num_episodes}")
+    logger.info(f"Failed episodes: {failed_episodes}")
+    logger.info(f"Total transitions: {total_transitions}")
+    logger.info(f"Avg transitions/episode: {total_transitions / max(1, successful_episodes):.1f}")
+    logger.info("Embodiment distribution:")
     for emb, count in sorted(embodiment_counts.items()):
-        print(f"  {emb}: {count} episodes")
-    print(f"\nData saved to: {save_path}")
+        logger.info(f"  {emb}: {count} episodes")
+    logger.info("Control mode distribution:")
+    for mode, count in sorted(control_mode_counts.items()):
+        logger.info(f"  {mode}: {count} episodes")
+    logger.info(f"Data saved to: {save_path}")
     print("=" * 70)
     
-    # Save final statistics
+    # Save statistics
     stats = {
         "successful_episodes": successful_episodes,
         "failed_episodes": failed_episodes,
         "total_transitions": total_transitions,
         "embodiment_distribution": embodiment_counts,
-        "control_mode": args.control_mode,
+        "control_mode_distribution": control_mode_counts,
     }
     with open(save_path / "collection_stats.json", "w") as f:
         json.dump(stats, f, indent=2)

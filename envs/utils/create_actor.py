@@ -535,7 +535,7 @@ def create_actor(
         visual_file = get_glb_or_obj_file(modeldir, model_id)
 
     if not collision_file.exists() or not visual_file.exists():
-        print(modelname, "is not exist model file!")
+        # Silently return None for missing models (common during random exploration)
         return None
 
     try:

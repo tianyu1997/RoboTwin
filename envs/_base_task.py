@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 import sapien.core as sapien
 from sapien.render import clear_cache as sapien_clear_cache
 from sapien.utils.viewer import Viewer
@@ -11,6 +12,9 @@ import json
 import transforms3d as t3d
 from collections import OrderedDict
 import torch, random
+
+# Setup logger for base task
+_logger = logging.getLogger(__name__)
 
 from .utils import *
 import math
@@ -87,7 +91,7 @@ class Base_Task(gym.Env):
         self.plan_success = True
         self.step_lim = None
         self.fix_gripper = False
-        self.setup_scene()
+        self.setup_scene(**kwags)  # Pass kwargs for render_mode, rt_samples, rt_denoiser
 
         self.left_js = None
         self.right_js = None
@@ -117,9 +121,13 @@ class Base_Task(gym.Env):
 
         self.instruction = None  # for Eval
 
+        _logger.info("    [1/5] Creating table and wall...")
         self.create_table_and_wall(table_xy_bias=table_xy_bias, table_height=0.74)
+        _logger.info("    [2/5] Loading robot...")
         self.load_robot(**kwags)
+        _logger.info("    [3/5] Loading cameras...")
         self.load_camera(**kwags)
+        _logger.info("    [4/5] Moving robot to home state...")
         self.robot.move_to_homestate()
 
         render_freq = self.render_freq
@@ -128,11 +136,14 @@ class Base_Task(gym.Env):
         self.render_freq = render_freq
 
         self.robot.set_origin_endpose()
+        _logger.info("    [5/5] Loading actors...")
         self.load_actors()
 
         if self.cluttered_table:
+            _logger.info("    [+] Creating cluttered table...")
             self.get_cluttered_table()
 
+        _logger.info("    Checking scene stability...")
         is_stable, unstable_list = self.check_stable()
         if not is_stable:
             raise UnStableError(
@@ -215,10 +226,19 @@ class Base_Task(gym.Env):
         # give renderer to sapien sim
         self.engine.set_renderer(self.renderer)
 
-        sapien.render.set_camera_shader_dir("rt")
-        sapien.render.set_ray_tracing_samples_per_pixel(32)
-        sapien.render.set_ray_tracing_path_depth(8)
-        sapien.render.set_ray_tracing_denoiser("oidn")
+        # Render mode: "rt" for ray-tracing (high quality), "rasterize" for faster rendering
+        render_mode = kwargs.get("render_mode", "rt")
+        if render_mode == "rt":
+            sapien.render.set_camera_shader_dir("rt")
+            sapien.render.set_ray_tracing_samples_per_pixel(kwargs.get("rt_samples", 32))
+            sapien.render.set_ray_tracing_path_depth(kwargs.get("rt_depth", 8))
+            # Use "oidn" for quality, "none" to skip denoiser (faster but noisier)
+            denoiser = kwargs.get("rt_denoiser", "oidn")
+            if denoiser != "none":
+                sapien.render.set_ray_tracing_denoiser(denoiser)
+        else:
+            # Use rasterization shader (much faster, lower quality)
+            sapien.render.set_camera_shader_dir("default")
 
         # declare sapien scene
         scene_config = sapien.SceneConfig()
@@ -1476,7 +1496,8 @@ class Base_Task(gym.Env):
             self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
 
         self.take_action_cnt += 1
-        print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
+        # Note: step printing disabled to avoid conflicts with progress bars
+        # print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
 
         self._update_render()
         if self.render_freq:

@@ -13,12 +13,40 @@ Features:
 
 from .._base_task import Base_Task
 from ..utils import *
+from ..utils.rand_create_cluttered_actor import get_all_cluttered_objects, rand_create_cluttered_actor
 import sapien
 import numpy as np
 import glob
 import os
 import transforms3d as t3d
 from typing import List, Tuple, Optional, Dict, Any
+
+# Pre-load object info at module level for speed
+_CLUTTERED_OBJECTS_INFO, _CLUTTERED_OBJECTS_LIST, _SAME_OBJ = None, None, None
+
+# Verified stable objects that won't cause UnStableError
+# These are flat-bottomed or have stable bases
+_VERIFIED_STABLE_OBJECTS = [
+    # From assets/objects - verified stable with "stable": true in json
+    "002_bowl", "003_plate", "007_shoe-box", "008_tray",
+    "021_cup", "023_tissue-box", "039_mug", "047_mouse",
+    "048_stapler", "059_pencup", "062_plasticbox", "071_can",
+    "073_rubikscube", "077_phone",
+]
+
+def _init_object_cache():
+    """Initialize object cache once at module load."""
+    global _CLUTTERED_OBJECTS_INFO, _CLUTTERED_OBJECTS_LIST, _SAME_OBJ
+    if _CLUTTERED_OBJECTS_INFO is None:
+        try:
+            _CLUTTERED_OBJECTS_INFO, _CLUTTERED_OBJECTS_LIST, _SAME_OBJ = get_all_cluttered_objects()
+            # Filter to only verified stable objects
+            _CLUTTERED_OBJECTS_LIST = [obj for obj in _CLUTTERED_OBJECTS_LIST 
+                                        if obj in _VERIFIED_STABLE_OBJECTS]
+        except Exception as e:
+            _CLUTTERED_OBJECTS_INFO, _CLUTTERED_OBJECTS_LIST, _SAME_OBJ = {}, [], {}
+
+_init_object_cache()
 
 
 class random_exploration(Base_Task):
@@ -64,8 +92,15 @@ class random_exploration(Base_Task):
         kwargs["domain_randomization"]["random_background"] = kwargs["domain_randomization"].get("random_background", True)
         kwargs["domain_randomization"]["random_light"] = kwargs["domain_randomization"].get("random_light", True)
         
+        # Store embodiment config for robot info
+        self._embodiment_config = kwargs.get("embodiment", None)
+        self.left_robot_file = kwargs.get("left_robot_file", None)
+        
         # Initialize base environment (will check stability and may raise UnStableError)
         super()._init_task_env_(**kwargs)
+        
+        # Simulation parameters
+        self.frame_skip = kwargs.get("frame_skip", 10)  # Number of sim steps per action
         
         # State tracking
         self.executed_steps = 0
@@ -77,10 +112,92 @@ class random_exploration(Base_Task):
         # Randomize initial state
         self._randomize_robot_initial_state()
 
+    def reset_for_new_episode(self, seed: int = None):
+        """
+        Reset scene for a new episode WITHOUT reloading the robot.
+        This is much faster than calling setup_demo again.
+        
+        Only resets:
+        - Objects on the table
+        - Robot position to home state
+        - Recording data
+        
+        Does NOT reload:
+        - Robot model
+        - Cameras
+        - Scene/renderer
+        """
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # Remove existing placed objects
+        for obj in self.placed_objects:
+            try:
+                self.scene.remove_actor(obj.entity if hasattr(obj, 'entity') else obj)
+            except:
+                pass
+        self.placed_objects = []
+        
+        # Reset prohibited area and size_dict (keep robot area)
+        self.prohibited_area = []
+        self.size_dict = []
+        
+        # Add robot prohibited area back
+        self._add_robot_prohibited_area()
+        
+        # Load new objects
+        self.load_actors()
+        
+        # Check stability
+        from envs.utils.create_actor import UnStableError
+        is_stable, unstable_list = self.check_stable()
+        if not is_stable:
+            raise UnStableError(f'Objects unstable: {", ".join(unstable_list)}')
+        
+        # Reset robot to home state
+        self.robot.move_to_homestate()
+        
+        # Open grippers
+        render_freq = self.render_freq
+        self.render_freq = 0
+        self.together_open_gripper(save_freq=-1)
+        self.render_freq = render_freq
+        
+        # Randomize initial robot position
+        self._randomize_robot_initial_state()
+        
+        # Reset tracking
+        self.executed_steps = 0
+        self.recorded_data = []
+        self.take_action_cnt = 0
+        
+        return True
+    
+    def _add_robot_prohibited_area(self):
+        """Add robot base area to prohibited area."""
+        # Robot base is roughly at center, add safety margin
+        robot_radius = 0.3
+        self.prohibited_area.append([-robot_radius, -robot_radius, robot_radius, robot_radius])
+
     def _setup_robot_info(self):
         """Extract robot information for cross-embodiment support."""
+        # Get embodiment name from config (passed in setup_demo)
+        embodiment_config = getattr(self, '_embodiment_config', None)
+        if embodiment_config:
+            embodiment_name = embodiment_config[0] if isinstance(embodiment_config, list) else str(embodiment_config)
+        elif hasattr(self.robot, 'name'):
+            embodiment_name = self.robot.name
+        else:
+            # Try to extract from left_robot_file path
+            left_robot_file = getattr(self, 'left_robot_file', None)
+            if left_robot_file:
+                # Extract embodiment name from path like ".../assets/embodiments/franka-panda"
+                embodiment_name = os.path.basename(left_robot_file.rstrip('/'))
+            else:
+                embodiment_name = "unknown"
+        
         self.robot_info = {
-            "embodiment": self.robot.name if hasattr(self.robot, 'name') else "unknown",
+            "embodiment": embodiment_name,
             "left_arm_dof": len(self.robot.left_arm_joints),
             "right_arm_dof": len(self.robot.right_arm_joints),
             "has_gripper": True,
@@ -110,125 +227,115 @@ class random_exploration(Base_Task):
         }
 
     def load_actors(self):
-        """Load random objects onto the table without collision."""
+        """
+        Load random objects onto the table using rand_create_cluttered_actor.
+        This method follows the same approach as get_cluttered_table for stability.
+        """
         self.placed_objects: List = []
         
-        available_objects = self._get_available_objects()
-        if len(available_objects) == 0:
-            print("Warning: No available objects found, using default set")
-            available_objects = ["071_can", "021_cup", "002_bowl", "003_plate", "010_pen"]
+        # Use cached object info
+        global _CLUTTERED_OBJECTS_INFO, _CLUTTERED_OBJECTS_LIST
         
-        num_to_place = min(self.num_objects, len(available_objects))
-        if num_to_place > 0:
-            selected_objects = np.random.choice(available_objects, size=num_to_place, replace=False)
+        # Get available objects with their info
+        if _CLUTTERED_OBJECTS_INFO:
+            available_objects = list(_CLUTTERED_OBJECTS_INFO.keys())
         else:
-            selected_objects = []
+            available_objects = _VERIFIED_STABLE_OBJECTS.copy()
         
-        # Table bounds
-        x_range = [-0.35, 0.35]
-        y_range = [-0.25, 0.15]
-        z_base = 0.76 + self.table_z_bias
+        if len(available_objects) == 0:
+            return
         
-        placed_positions = []
-        min_distance = 0.12
+        # Table bounds (same as get_cluttered_table)
+        xlim = [-0.35, 0.35]
+        ylim = [-0.25, 0.15]
+        zlim = [0.76 + self.table_z_bias]
         
-        for obj_name in selected_objects:
-            max_attempts = 50
-            for attempt in range(max_attempts):
-                x = np.random.uniform(x_range[0], x_range[1])
-                y = np.random.uniform(y_range[0], y_range[1])
-                
-                if abs(x) < 0.1 and y < -0.15:
-                    continue
-                
-                valid = True
-                for px, py in placed_positions:
-                    if np.sqrt((x - px)**2 + (y - py)**2) < min_distance:
-                        valid = False
-                        break
-                
-                for area in self.prohibited_area:
-                    if area[0] <= x <= area[2] and area[1] <= y <= area[3]:
-                        valid = False
-                        break
-                
-                if valid:
-                    placed_positions.append((x, y))
-                    break
+        # Initialize size_dict for collision tracking (same format as get_cluttered_table)
+        size_dict = list(self.size_dict) if self.size_dict else []
+        
+        success_count = 0
+        max_try = 30  # Limit attempts to avoid infinite loops
+        trys = 0
+        
+        while success_count < self.num_objects and trys < max_try:
+            trys += 1
+            
+            # Randomly select an object
+            obj_name = np.random.choice(available_objects)
+            obj_info = _CLUTTERED_OBJECTS_INFO.get(obj_name, {})
+            
+            # Get object parameters
+            if "ids" in obj_info and "params" in obj_info:
+                # Use cluttered object format
+                obj_ids = obj_info["ids"]
+                obj_idx = np.random.choice(obj_ids)
+                obj_params = obj_info["params"].get(str(obj_idx), obj_info["params"].get(obj_idx, {}))
+                obj_radius = obj_params.get("radius", 0.05)
+                obj_offset = obj_params.get("z_offset", 0.0)
+                obj_maxz = obj_params.get("z_max", 0.1)
+                obj_type = obj_info.get("type", "glb")
             else:
+                # Fallback for simple objects
+                obj_idx = self._get_random_model_id(obj_name)
+                obj_radius = obj_info.get("radius", 0.05)
+                obj_offset = obj_info.get("z_offset", 0.0)
+                obj_maxz = 0.1
+                obj_type = "glb"
+            
+            # Use rand_create_cluttered_actor (same as get_cluttered_table)
+            success, obj = rand_create_cluttered_actor(
+                self.scene,
+                xlim=xlim,
+                ylim=ylim,
+                zlim=np.array(zlim),
+                modelname=obj_name,
+                modelid=str(obj_idx) if obj_type == "urdf" else obj_idx,
+                modeltype=obj_type,
+                rotate_rand=True,
+                rotate_lim=[0, 0, np.pi],
+                size_dict=size_dict,
+                obj_radius=obj_radius,
+                z_offset=obj_offset,
+                z_max=obj_maxz,
+                prohibited_area=self.prohibited_area,
+            )
+            
+            if not success or obj is None:
                 continue
             
-            z_rotation = np.random.uniform(-np.pi, np.pi)
-            quat = t3d.euler.euler2quat(0, 0, z_rotation)
-            model_id = self._get_random_model_id(obj_name)
+            # Successfully placed object
+            obj.set_name(f"{obj_name}")
+            self.placed_objects.append(obj)
             
-            try:
-                obj_pose = sapien.Pose([x, y, z_base], quat)
-                obj = create_actor(
-                    scene=self,
-                    pose=obj_pose,
-                    modelname=obj_name,
-                    convex=True,
-                    model_id=model_id,
-                )
-                self.placed_objects.append(obj)
-                self.add_prohibit_area(obj, padding=0.02)
-            except Exception as e:
-                print(f"Warning: Failed to create object {obj_name}: {e}")
-
-        print(f"Placed {len(self.placed_objects)} objects on the table")
+            # Update size_dict for next placement
+            pose = obj.get_pose().p.tolist()
+            pose.append(obj_radius)
+            size_dict.append(pose)
+            
+            # Add to prohibited area directly using obj_radius (avoids actor.config issues)
+            padding = 0.02
+            x, y, z = pose[:3]
+            self.prohibited_area.append([
+                x - obj_radius - padding,
+                y - obj_radius - padding,
+                x + obj_radius + padding,
+                y + obj_radius + padding,
+            ])
+            
+            success_count += 1
 
     def _get_available_objects(self) -> List[str]:
-        """Get list of available object types, using only known stable objects."""
+        """Get list of available object types, using verified stable objects."""
         if self.object_types is not None:
             return self.object_types
         
-        # Use only verified stable objects with complete model data (scale, stable:true)
-        # These objects have been verified to have proper collision meshes and loading data
-        stable_objects = [
-            "002_bowl",       # 7/7 stable
-            "003_plate",      # 1/1 stable
-            "004_fluted-block", # 2/2 stable
-            "007_shoe-box",   # 1/1 stable
-            "008_tray",       # 4/4 stable
-            "019_coaster",    # 1/1 stable
-            "021_cup",        # 13/13 stable
-            "023_tissue-box", # 7/7 stable
-            "039_mug",        # 13/13 stable
-            "047_mouse",      # 3/3 stable
-            "048_stapler",    # 7/7 stable
-            "057_toycar",     # 6/6 stable
-            "059_pencup",     # 7/7 stable
-            "062_plasticbox", # 11/11 stable
-            "071_can",        # 6/6 stable
-            "073_rubikscube", # 3/3 stable
-            "075_bread",      # 7/7 stable
-            "077_phone",      # 5/5 stable
-            "079_remotecontrol", # 7/7 stable
-        ]
+        # First try to use cached cluttered objects (much faster)
+        global _CLUTTERED_OBJECTS_LIST
+        if _CLUTTERED_OBJECTS_LIST:
+            return _CLUTTERED_OBJECTS_LIST.copy()
         
-        objects_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 
-                                    "..", "assets", "objects")
-        
-        available = []
-        try:
-            for item in os.listdir(objects_dir):
-                item_path = os.path.join(objects_dir, item)
-                if os.path.isdir(item_path) and item in stable_objects:
-                    # Check if this is in our stable list
-                    json_files = glob.glob(os.path.join(item_path, "model_data*.json"))
-                    if json_files:
-                        available.append(item)
-        except Exception as e:
-            print(f"Error scanning objects directory: {e}")
-        
-        if not available:
-            # Fallback if no stable objects found
-            print("Warning: No stable objects found, using fallback list")
-            available = ["002_bowl", "003_plate", "037_box"]
-        
-        print(f"Found {len(available)} stable objects for exploration")
-        return available
+        # Return verified stable objects directly
+        return _VERIFIED_STABLE_OBJECTS.copy()
 
     def _get_random_model_id(self, obj_name: str) -> int:
         """Get a random model ID for the given object."""
@@ -251,30 +358,139 @@ class random_exploration(Base_Task):
             return 0
 
     def _randomize_robot_initial_state(self):
-        """Randomize robot initial joint positions while keeping wrist cameras facing the table."""
-        left_home = np.array(self.robot.left_homestate, dtype=np.float32)
-        right_home = np.array(self.robot.right_homestate, dtype=np.float32)
+        """
+        Randomize robot initial joint positions while ensuring:
+        1. End-effectors are above the table in reachable workspace
+        2. Wrist cameras can see the table (EE pointing downward)
+        3. Arms don't collide with each other
+        """
+        # Table surface height
+        table_z = 0.74 + self.table_z_bias
         
-        perturbation_scale = 0.15
-        num_arm_joints = min(len(left_home), 6)
+        # Relaxed workspace bounds - will validate EE is above table and pointing down
+        # Different robots have different workspace, so we use relative checks
+        min_height_above_table = 0.10  # minimum 10cm above table
+        max_height_above_table = 0.50  # maximum 50cm above table
         
-        left_perturb = np.random.uniform(-perturbation_scale, perturbation_scale, num_arm_joints)
-        right_perturb = np.random.uniform(-perturbation_scale, perturbation_scale, num_arm_joints)
+        max_attempts = 30
+        success = False
         
-        left_home[:num_arm_joints] += left_perturb
-        right_home[:num_arm_joints] += right_perturb
+        for attempt in range(max_attempts):
+            # Start from home position
+            left_qpos = np.array(self.robot.left_homestate, dtype=np.float32).copy()
+            right_qpos = np.array(self.robot.right_homestate, dtype=np.float32).copy()
+            
+            # Perturbation scale - start smaller, increase if failing
+            base_scale = 0.15 + 0.15 * (attempt / max_attempts)
+            
+            # Perturb joints with decreasing scale towards wrist
+            num_left = len(left_qpos)
+            num_right = len(right_qpos)
+            
+            # Joint-specific scales: more perturbation on base joints, less on wrist
+            def get_joint_scales(n):
+                if n >= 7:  # 7 DOF (franka)
+                    return np.array([1.0, 0.8, 0.8, 0.6, 0.5, 0.4, 0.3])
+                else:  # 6 DOF
+                    return np.array([1.0, 0.8, 0.8, 0.6, 0.4, 0.3])
+            
+            left_scales = get_joint_scales(num_left)[:num_left]
+            right_scales = get_joint_scales(num_right)[:num_right]
+            
+            left_perturb = np.random.uniform(-1, 1, num_left) * base_scale * left_scales
+            right_perturb = np.random.uniform(-1, 1, num_right) * base_scale * right_scales
+            
+            left_qpos += left_perturb
+            right_qpos += right_perturb
+            
+            # Clip to joint limits
+            limits = self.robot_info["arm_joint_limits"]
+            left_qpos = np.clip(left_qpos, limits["left_lower"], limits["left_upper"])
+            right_qpos = np.clip(right_qpos, limits["right_lower"], limits["right_upper"])
+            
+            # Apply joint positions
+            for i, joint in enumerate(self.robot.left_arm_joints):
+                joint.set_drive_target(float(left_qpos[i]))
+            for i, joint in enumerate(self.robot.right_arm_joints):
+                joint.set_drive_target(float(right_qpos[i]))
+            
+            # Step simulation to update poses
+            for _ in range(30):
+                self.scene.step()
+            self.scene.update_render()
+            
+            # Check end-effector positions
+            left_ee = self.get_arm_pose("left")
+            right_ee = self.get_arm_pose("right")
+            
+            # Validate height above table
+            left_height_ok = min_height_above_table <= (left_ee[2] - table_z) <= max_height_above_table
+            right_height_ok = min_height_above_table <= (right_ee[2] - table_z) <= max_height_above_table
+            
+            # Check EEs are within reasonable horizontal range (not too far from table center)
+            left_horiz_ok = abs(left_ee[0]) < 0.6 and abs(left_ee[1]) < 0.5
+            right_horiz_ok = abs(right_ee[0]) < 0.6 and abs(right_ee[1]) < 0.5
+            
+            # Check arms don't collide (minimum distance between EEs)
+            ee_distance = np.linalg.norm(np.array(left_ee[:3]) - np.array(right_ee[:3]))
+            arms_safe = ee_distance > 0.12
+            
+            # Check EE orientation - should be roughly pointing down for wrist camera to see table
+            left_z_down = self._check_ee_pointing_down("left")
+            right_z_down = self._check_ee_pointing_down("right")
+            
+            all_valid = (left_height_ok and right_height_ok and 
+                        left_horiz_ok and right_horiz_ok and 
+                        arms_safe and left_z_down and right_z_down)
+            
+            if all_valid:
+                success = True
+                break
         
-        for i, joint in enumerate(self.robot.left_arm_joints):
-            if i < len(left_home):
-                joint.set_drive_target(left_home[i])
+        if not success:
+            # Fallback to home position with very small perturbation
+            left_qpos = np.array(self.robot.left_homestate, dtype=np.float32)
+            right_qpos = np.array(self.robot.right_homestate, dtype=np.float32)
+            
+            # Very small safe perturbation on first few joints only
+            n_perturb = min(3, len(left_qpos))
+            left_qpos[:n_perturb] += np.random.uniform(-0.08, 0.08, n_perturb)
+            right_qpos[:n_perturb] += np.random.uniform(-0.08, 0.08, n_perturb)
+            
+            for i, joint in enumerate(self.robot.left_arm_joints):
+                joint.set_drive_target(float(left_qpos[i]))
+            for i, joint in enumerate(self.robot.right_arm_joints):
+                joint.set_drive_target(float(right_qpos[i]))
+            
+            for _ in range(30):
+                self.scene.step()
+            self.scene.update_render()
+    
+    def _check_ee_pointing_down(self, arm: str) -> bool:
+        """
+        Check if end-effector is roughly pointing downward (for wrist camera to see table).
         
-        for i, joint in enumerate(self.robot.right_arm_joints):
-            if i < len(right_home):
-                joint.set_drive_target(right_home[i])
+        Returns True if the EE z-axis has a significant downward component.
+        """
+        ee_pose = self.get_arm_pose(arm)  # [x, y, z, qw, qx, qy, qz]
+        quat = ee_pose[3:7]  # quaternion
         
-        for _ in range(50):
-            self.scene.step()
-        self.scene.update_render()
+        # Convert quaternion to rotation matrix and check z-axis direction
+        # The EE z-axis in world frame should have negative z component (pointing down)
+        import transforms3d as t3d
+        
+        try:
+            # quat format: [w, x, y, z]
+            rot_matrix = t3d.quaternions.quat2mat(quat)
+            # z-axis of EE in world frame
+            ee_z_axis = rot_matrix[:, 2]
+            
+            # Check if EE z-axis points downward (negative world z)
+            # Allow some tolerance - z component should be < -0.3 (roughly pointing down)
+            return ee_z_axis[2] < -0.3
+        except:
+            # If conversion fails, assume it's okay
+            return True
 
     # ==================== State Representation ====================
     
@@ -586,12 +802,17 @@ class random_exploration(Base_Task):
 
     def play_once(self):
         """Execute random exploration by performing random delta actions."""
-        print(f"Starting random exploration:")
-        print(f"  Control mode: {self.control_mode}")
-        print(f"  Steps: {self.num_random_steps}")
-        print(f"  Robot: {self.robot_info['embodiment']}")
+        # Single line header with all info
+        header = f"[{self.robot_info['embodiment']}|{self.control_mode}] "
         
         for step in range(self.num_random_steps):
+            # Progress bar
+            progress = (step + 1) / self.num_random_steps
+            bar_len = 20
+            filled = int(bar_len * progress)
+            bar = '█' * filled + '░' * (bar_len - filled)
+            print(f"\r{header}[{bar}] {step+1}/{self.num_random_steps}", end='', flush=True)
+            
             # 1. Get current state BEFORE action
             state_before = self._get_current_state()
             
@@ -605,7 +826,7 @@ class random_exploration(Base_Task):
             try:
                 self._execute_delta_action(action_dict)
             except Exception as e:
-                print(f"Warning: Action execution failed at step {step}: {e}")
+                print(f"\n  Warning: Action execution failed at step {step}: {e}")
             
             # 5. Get state AFTER action
             state_after = self._get_current_state()
@@ -614,11 +835,10 @@ class random_exploration(Base_Task):
             self._record_transition(state_before, action_vector, action_dict, state_after, obs_before)
             
             self.executed_steps += 1
-            
-            if step % 20 == 0:
-                print(f"  Step {step}/{self.num_random_steps}")
         
-        print(f"Random exploration completed. Recorded {len(self.recorded_data)} transitions.")
+        # Complete the progress bar
+        bar = '█' * bar_len
+        print(f"\r{header}[{bar}] {self.num_random_steps}/{self.num_random_steps} ✓")
         
         self.info["info"] = {
             "num_objects": len(self.placed_objects),
@@ -652,15 +872,33 @@ class random_exploration(Base_Task):
         states_t1 = np.stack([d["state_t1"] for d in self.recorded_data])
         actual_deltas = np.stack([d["actual_delta"] for d in self.recorded_data])
         
-        # Images - extract relevant camera views
+        # Images - extract from observation structure
+        # The observation structure is: {"observation": {camera_name: {"rgb": array, ...}, ...}}
         images = {}
         sample_obs = self.recorded_data[0]["observation"]
-        for key in sample_obs:
-            if "rgb" in key or "head" in key or "wrist" in key:
-                try:
-                    images[key] = np.stack([d["observation"][key] for d in self.recorded_data])
-                except:
-                    pass
+        
+        # Check if it's the nested format (from get_obs)
+        if "observation" in sample_obs:
+            # Nested format: {"observation": {camera_name: {"rgb": ...}}}
+            for camera_name, camera_data in sample_obs["observation"].items():
+                if isinstance(camera_data, dict) and "rgb" in camera_data:
+                    key = f"{camera_name}_rgb"
+                    try:
+                        images[key] = np.stack([
+                            d["observation"]["observation"][camera_name]["rgb"] 
+                            for d in self.recorded_data
+                        ])
+                    except Exception as e:
+                        print(f"Warning: Could not stack images for {key}: {e}")
+        else:
+            # Flat format: look for rgb keys directly
+            for key in sample_obs:
+                if "rgb" in key.lower() or "head" in key.lower() or "wrist" in key.lower():
+                    try:
+                        if isinstance(sample_obs[key], np.ndarray):
+                            images[key] = np.stack([d["observation"][key] for d in self.recorded_data])
+                    except Exception as e:
+                        print(f"Warning: Could not stack images for {key}: {e}")
         
         return {
             "states_t": states_t,
