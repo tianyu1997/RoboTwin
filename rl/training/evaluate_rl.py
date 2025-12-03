@@ -9,9 +9,9 @@ import os
 
 # Add RoboTwin root to path
 current_file = os.path.abspath(__file__)
-rl_dir = os.path.dirname(current_file)
-envs_dir = os.path.dirname(rl_dir)
-robotwin_dir = os.path.dirname(envs_dir)
+training_dir = os.path.dirname(current_file)    # rl/training/
+rl_dir = os.path.dirname(training_dir)          # rl/
+robotwi_dir = os.path.dirname(rl_dir)          # RoboTwin/
 sys.path.insert(0, robotwin_dir)
 
 import argparse
@@ -21,7 +21,7 @@ from typing import Optional, List, Dict
 import json
 from datetime import datetime
 
-from envs.rl import RoboTwinGymEnv
+from rl import RoboTwinGymEnv
 
 
 def parse_args():

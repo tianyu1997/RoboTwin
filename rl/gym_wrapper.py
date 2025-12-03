@@ -17,9 +17,8 @@ from copy import deepcopy
 
 # Ensure path is set correctly
 current_file_path = os.path.abspath(__file__)
-parent_directory = os.path.dirname(current_file_path)
-envs_directory = os.path.dirname(parent_directory)
-root_directory = os.path.dirname(envs_directory)
+rl_directory = os.path.dirname(current_file_path)       # rl/
+root_directory = os.path.dirname(rl_directory)          # RoboTwin/
 if root_directory not in sys.path:
     sys.path.insert(0, root_directory)
 

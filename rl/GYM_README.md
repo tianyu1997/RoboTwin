@@ -52,7 +52,7 @@ pip install stable-baselines3[extra]
 ### Basic Usage
 
 ```python
-from envs.rl import RoboTwinGymEnv, make_robotwin_env
+from rl import RoboTwinGymEnv, make_robotwin_env
 
 # Create environment
 env = RoboTwinGymEnv(
@@ -81,7 +81,7 @@ env.close()
 ### Vectorized Environment
 
 ```python
-from envs.rl import RoboTwinVecEnv, make_vec_env
+from rl import RoboTwinVecEnv, make_vec_env
 
 # Create vectorized environment
 vec_env = RoboTwinVecEnv(
@@ -105,7 +105,7 @@ vec_env.close()
 
 ```python
 import gymnasium as gym
-from envs.rl import register_robotwin_envs
+from rl import register_robotwin_envs
 
 # Register environments
 register_robotwin_envs()
@@ -121,7 +121,7 @@ env = gym.make("RoboTwin-beat_block_hammer-v0")
 ```python
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
-from envs.rl import RoboTwinGymEnv
+from rl import RoboTwinGymEnv
 
 # Create environment
 def make_env(seed):

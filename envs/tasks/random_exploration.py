@@ -752,6 +752,37 @@ class random_exploration(Base_Task):
                 self.scene.step()
             self.scene.update_render()
 
+    # ==================== Observation for RL ====================
+    
+    def get_observation(self) -> Dict[str, np.ndarray]:
+        """
+        Get current observation for RL training.
+        
+        Returns a dict with:
+        - head_rgb: Head camera image [H, W, 3]
+        - left_wrist_rgb: Left wrist camera image [H, W, 3]  
+        - right_wrist_rgb: Right wrist camera image [H, W, 3]
+        """
+        self._update_render()
+        self.cameras.update_picture()
+        
+        rgb_dict = self.cameras.get_rgb()
+        
+        result = {}
+        
+        # Map camera names to standard keys
+        camera_mapping = {
+            'head_camera': 'head_rgb',
+            'left_camera': 'left_wrist_rgb', 
+            'right_camera': 'right_wrist_rgb',
+        }
+        
+        for cam_name, key in camera_mapping.items():
+            if cam_name in rgb_dict and 'rgb' in rgb_dict[cam_name]:
+                result[key] = rgb_dict[cam_name]['rgb']
+                
+        return result
+
     # ==================== Data Recording ====================
 
     def _record_transition(self, 

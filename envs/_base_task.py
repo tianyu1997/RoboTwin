@@ -84,7 +84,7 @@ class Base_Task(gym.Env):
         self.random_table_height = random_setting.get("random_table_height", 0)
         self.random_light = random_setting.get("random_light", False)
         self.crazy_random_light_rate = random_setting.get("crazy_random_light_rate", 0)
-        self.crazy_random_light = (0 if not self.random_light else np.random.rand() < self.crazy_random_light_rate)
+        self.crazy_random_light = (np.random.rand() < self.crazy_random_light_rate if self.random_light else 0)
         self.random_embodiment = random_setting.get("random_embodiment", False)  # TODO
         self.actors = []
         self.file_path = [] 
@@ -159,7 +159,7 @@ class Base_Task(gym.Env):
                     self.step_lim = 1000
 
         # info
-        self.info = dict()
+        self.info = {}
         self.info["cluttered_table_info"] = self.record_cluttered_objects
         self.info["texture_info"] = {
             "wall_texture": self.wall_texture,
@@ -298,7 +298,7 @@ class Base_Task(gym.Env):
         table_height += self.table_z_bias
 
         if self.random_background:
-            texture_type = "seen" if not self.eval_mode else "unseen"
+            texture_type = "unseen" if self.eval_mode else "seen"
             directory_path = f"./assets/background_texture/{texture_type}"
             file_count = len(
                 [name for name in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, name))])
@@ -1555,8 +1555,10 @@ class Base_Task(gym.Env):
                 times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
                                                                                             1 / 250,
                                                                                             verbose=True))
-                left_result = dict()
-                left_result["position"], left_result["velocity"] = left_pos, left_vel
+                left_result = {
+                    "position": left_pos,
+                    "velocity": left_vel,
+                }
                 left_n_step = left_result["position"].shape[0]
             except Exception as e:
                 # print("left arm TOPP error: ", e)
@@ -1571,8 +1573,10 @@ class Base_Task(gym.Env):
                 times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
                                                                                                 1 / 250,
                                                                                                 verbose=True))
-                right_result = dict()
-                right_result["position"], right_result["velocity"] = right_pos, right_vel
+                right_result = {
+                    "position": right_pos,
+                    "velocity": right_vel,
+                }
                 right_n_step = right_result["position"].shape[0]
             except Exception as e:
                 # print("right arm TOPP error: ", e)
@@ -1726,7 +1730,7 @@ class Base_Task(gym.Env):
         match = re.match(r'(step[_]?\d+)(?:_(.*))?', step_name)
         if match:
             step_num = match.group(1)
-            step_description = match.group(2) if match.group(2) else ""
+            step_description = match.group(2) or ""
         else:
             step_num = None
             step_description = step_name

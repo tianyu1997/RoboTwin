@@ -548,7 +548,6 @@ def main():
     for mode, count in sorted(control_mode_counts.items()):
         logger.info(f"  {mode}: {count} episodes")
     logger.info(f"Data saved to: {save_path}")
-    print("=" * 70)
     
     # Save statistics
     stats = {

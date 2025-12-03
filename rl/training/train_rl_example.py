@@ -12,9 +12,9 @@ import os
 
 # Add RoboTwin root to path
 current_file = os.path.abspath(__file__)
-rl_dir = os.path.dirname(current_file)
-envs_dir = os.path.dirname(rl_dir)
-robotwin_dir = os.path.dirname(envs_dir)
+training_dir = os.path.dirname(current_file)    # rl/training/
+rl_dir = os.path.dirname(training_dir)          # rl/
+robotwi_dir = os.path.dirname(rl_dir)          # RoboTwin/
 sys.path.insert(0, robotwin_dir)
 
 import numpy as np
@@ -28,7 +28,7 @@ def example_basic_usage():
     print("Example 1: Basic Environment Usage")
     print("=" * 60)
     
-    from envs.rl import RoboTwinGymEnv, make_robotwin_env
+    from rl import RoboTwinGymEnv, make_robotwin_env
     
     # Method 1: Direct instantiation
     env = RoboTwinGymEnv(
@@ -77,7 +77,7 @@ def example_vectorized_env():
     print("Example 2: Vectorized Environment")
     print("=" * 60)
     
-    from envs.rl import make_vec_env, RoboTwinVecEnv
+    from rl import make_vec_env, RoboTwinVecEnv
     
     # Method 1: Using make_vec_env function
     # vec_env = make_vec_env(
@@ -124,7 +124,7 @@ def example_gymnasium_registered():
     print("Example 3: Using Gymnasium Registry")
     print("=" * 60)
     
-    from envs.rl import register_robotwin_envs
+    from rl import register_robotwin_envs
     
     # Register environments
     register_robotwin_envs()
@@ -154,7 +154,7 @@ def example_stable_baselines3():
         from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
         from stable_baselines3.common.callbacks import EvalCallback
         
-        from envs.rl import RoboTwinGymEnv
+        from rl import RoboTwinGymEnv
         
         # Create environment factory
         def make_env(seed: int):
@@ -280,7 +280,7 @@ def example_observation_wrappers():
     print("=" * 60)
     
     from gymnasium.wrappers import FlattenObservation, FilterObservation
-    from envs.rl import RoboTwinGymEnv
+    from rl import RoboTwinGymEnv
     
     # Create base environment
     env = RoboTwinGymEnv(
