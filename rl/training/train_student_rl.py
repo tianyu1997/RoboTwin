@@ -57,11 +57,13 @@ from rl.training.rl_training_common import (
     setup_scheduler,
     clip_gradients,
     count_trainable_params,
+    setup_logging_from_config,
+    set_policy_requires_grad,
 )
 
-# Setup logging
+# Default logging (will be overridden by config)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -126,12 +128,30 @@ class StudentTrainer(BaseRLTrainer):
         teacher_policy: nn.Module,
         policy_config,
         rl_config: OmegaConf,
+        model_config_file: str,
         device: str = "cuda",
     ):
+        # Load model config to get n_obs_img_steps and stride
+        import yaml
+        with open(model_config_file, 'r') as f:
+            model_cfg = yaml.safe_load(f)
+        
+        train_datasets = model_cfg.get('dataset', {}).get('train_dir', {})
+        if not train_datasets:
+            raise ValueError("No train datasets found in model config")
+        
+        first_dataset = next(iter(train_datasets.values()))
+        self.n_obs_img_steps = first_dataset.get('n_obs_img_steps', 4)
+        self.obs_img_stride = first_dataset.get('obs_img_stride', 1)
+        
         # Get training config
         train_config = get_training_config(rl_config)
         student_config = rl_config.get("student", {})
         output_dir = student_config.get("output_dir", "./outputs/student_rl")
+        
+        # Override config with values from model config
+        self.n_pred_img_steps = train_config.n_pred_img_steps
+        train_config.history_length = self.n_obs_img_steps  # observation buffer
         
         super().__init__(
             policy=student_policy,
@@ -145,14 +165,19 @@ class StudentTrainer(BaseRLTrainer):
         self.policy_config = policy_config
         self.rl_config = rl_config
         
+        print(f"Student policy config from {model_config_file}:")
+        print(f"  n_obs_img_steps: {self.n_obs_img_steps}")
+        print(f"  n_pred_img_steps: {self.n_pred_img_steps}")
+        print(f"  history_length: {train_config.history_length}")
+        
         # Freeze teacher
         self.teacher_policy.eval()
         for param in self.teacher_policy.parameters():
             param.requires_grad = False
         
-        # World model image steps
-        self.cur_n_obs_img_steps = train_config.n_obs_img_steps
-        self.cur_n_pred_img_steps = train_config.n_pred_img_steps
+        # World model image steps (for compatibility)
+        self.cur_n_obs_img_steps = self.n_obs_img_steps
+        self.cur_n_pred_img_steps = self.n_pred_img_steps
         
         # Reward weights
         rewards_config = student_config.get("rewards", {})
@@ -167,8 +192,18 @@ class StudentTrainer(BaseRLTrainer):
         self.gamma = ppo_config.get("gamma", 0.99)
         self.gae_lambda = ppo_config.get("gae_lambda", 0.95)
         
-        # Setup policy for training
+        # Setup student policy for training - train action expert only
         self.student_policy.train()
+        
+        # Set gradient flags: train action expert, freeze world model
+        print("\nConfiguring student training: Action Expert only")
+        set_policy_requires_grad(
+            self.student_policy,
+            freeze_vision_encoder=True,
+            freeze_gen_expert=True,  # Freeze world model (use teacher's WM)
+            train_act_expert_only=True,  # Only train action prediction
+            train_gen_expert_only=False,
+        )
         
         # Setup optimizer and scheduler
         trainable, total = count_trainable_params(self.student_policy)
@@ -189,22 +224,25 @@ class StudentTrainer(BaseRLTrainer):
         # Environment config
         self.env_config = get_environment_config(rl_config)
         
-        # Setup batch builder with wrist cameras
+        # Setup batch builder - student uses only wrist camera
         self.batch_builder = BatchBuilder(
             device=device,
-            image_keys=["left_wrist_rgb", "right_wrist_rgb"],
+            image_keys=["head_rgb", "wrist_rgb"],  # Need both for WM history
+            use_head_camera=False,  # Student: wrist_rgb only (image0) for VLM
         )
         
-        # Additional batch builder for teacher (head camera)
+        # Teacher uses head + wrist cameras
         self.teacher_batch_builder = BatchBuilder(
             device=device,
-            image_keys=["head_rgb"],
+            image_keys=["head_rgb", "wrist_rgb"],
+            use_head_camera=True,  # Teacher: head_rgb (image0) + wrist_rgb (image1)
         )
         
         # Memory managers for student and teacher
         self.student_memory = MemoryStateManager()
         self.teacher_memory = MemoryStateManager()
-        self.prev_teacher_memory: Optional[torch.Tensor] = None
+        # Track previous divergence for reward computation
+        self.prev_memory_divergence: float = 0.0
         
         # Value head for PPO
         self.value_head = nn.Linear(policy_config.state_dim, 1).to(device)
@@ -242,7 +280,7 @@ class StudentTrainer(BaseRLTrainer):
         # Reset memory states
         self.student_memory.reset()
         self.teacher_memory.reset()
-        self.prev_teacher_memory = None
+        self.prev_memory_divergence = 0.0
         
         done = False
         step = 0
@@ -255,9 +293,13 @@ class StudentTrainer(BaseRLTrainer):
             if self.student_memory.current_memory is not None:
                 batch["initial_memory_state"] = self.student_memory.current_memory
             
-            # Get action from student policy
+            # Get action from student policy (also updates student memory)
             with torch.no_grad():
-                actions, log_probs, values = self._forward_student(batch)
+                actions, log_probs, values, student_memory_out = self._forward_student(batch)
+            
+            # Update student memory state
+            if student_memory_out is not None:
+                self.student_memory.update(student_memory_out)
             
             action = actions[0].cpu().numpy()
             log_prob = log_probs[0].item()
@@ -330,8 +372,16 @@ class StudentTrainer(BaseRLTrainer):
         self,
         batch: Dict[str, torch.Tensor],
         deterministic: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Forward pass through student model."""
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward pass through student model.
+        
+        Returns:
+            actions: Sampled actions [B, action_dim]
+            log_probs: Log probabilities [B]
+            values: Value estimates [B]
+            memory_state: Updated memory state (or None)
+        """
         # Use student model to generate actions
         noise = torch.randn(
             1, self.policy_config.chunk_size,
@@ -340,6 +390,7 @@ class StudentTrainer(BaseRLTrainer):
         )
         
         # Sample actions from student model
+        # Note: This should return memory_state if the model supports it
         action_output = self.student_policy.sample_actions_with_world_model(
             images=[batch.get("observation.images.image1")],
             image_masks=[batch.get("observation.images.image1_mask", 
@@ -354,7 +405,14 @@ class StudentTrainer(BaseRLTrainer):
             initial_memory_state=batch.get("initial_memory_state"),
         )
         
-        action_mean = action_output[:, 0, :]
+        # Handle output format (may be tuple with memory_state)
+        if isinstance(action_output, tuple):
+            action_tensor, memory_state = action_output[0], action_output[1] if len(action_output) > 1 else None
+        else:
+            action_tensor = action_output
+            memory_state = None
+        
+        action_mean = action_tensor[:, 0, :]
         std = torch.exp(self.log_std)
         
         if deterministic:
@@ -371,14 +429,27 @@ class StudentTrainer(BaseRLTrainer):
         state_emb = self.student_policy.state_proj(batch["observation.state"])
         values = self.value_head(state_emb).squeeze(-1)
         
-        return actions, log_probs, values
+        return actions, log_probs, values, memory_state
     
     def _compute_custom_reward(
         self,
         obs: Dict[str, np.ndarray],
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[float, Dict[str, Any]]:
-        """Compute custom reward for student exploration."""
+        """
+        Compute custom reward for student to imitate teacher.
+        
+        Memory divergence reward (negative to encourage convergence):
+            r_mem = -(||h_student^{t+1} - h_teacher^{t+1}|| - ||h_student^t - h_teacher^t||)
+        
+        Positive reward when student gets closer to teacher (divergence decreases).
+        Negative reward when student diverges from teacher.
+        """
+        # ===== Get student memory at t+1 =====
+        # Student forward pass (already done in collect_episode, get memory from manager)
+        student_memory_t1 = self.student_memory.current_memory
+        
+        # ===== Get teacher memory at t+1 =====
         # Inject teacher memory state
         teacher_batch = batch.copy()
         if self.teacher_memory.current_memory is not None:
@@ -394,32 +465,40 @@ class StudentTrainer(BaseRLTrainer):
             )
         
         # Update teacher memory
-        teacher_memory = wm_output.get("memory_state")
-        if teacher_memory is not None:
-            self.teacher_memory.update(teacher_memory)
+        teacher_memory_t1 = wm_output.get("memory_state")
+        if teacher_memory_t1 is not None:
+            self.teacher_memory.update(teacher_memory_t1)
         
-        # Memory divergence reward
-        memory_divergence = 0.0
-        if self.prev_teacher_memory is not None and teacher_memory is not None:
-            memory_change = teacher_memory - self.prev_teacher_memory
-            memory_divergence = torch.norm(memory_change).item()
+        # ===== Compute memory divergence reward =====
+        # r_mem = -(||h_student^{t+1} - h_teacher^{t+1}|| - ||h_student^t - h_teacher^t||)
+        # Negative sign: reward decreasing divergence (student gets closer to teacher)
+        memory_divergence_reward = 0.0
+        current_divergence = 0.0
         
-        self.prev_teacher_memory = teacher_memory.detach() if teacher_memory is not None else None
+        if student_memory_t1 is not None and teacher_memory_t1 is not None:
+            # Compute ||h_student^{t+1} - h_teacher^{t+1}||
+            current_divergence = torch.norm(student_memory_t1 - teacher_memory_t1).item()
+            # Negative: reward when divergence decreases
+            memory_divergence_reward = -(current_divergence - self.prev_memory_divergence)
         
-        # WM uncertainty
+        # Update for next step
+        self.prev_memory_divergence = current_divergence
+        
+        # ===== WM uncertainty (entropy of prediction) =====
         wm_logits = wm_output.get("wm_logits", torch.zeros(1, device=self.device))
         wm_probs = F.softmax(wm_logits, dim=-1)
         wm_entropy = -torch.sum(wm_probs * torch.log(wm_probs + 1e-8), dim=-1)
         wm_uncertainty = wm_entropy.mean().item()
         
-        # Combined reward
+        # ===== Combined reward =====
         reward = (
-            self.memory_divergence_weight * memory_divergence +
+            self.memory_divergence_weight * memory_divergence_reward +
             self.wm_uncertainty_weight * wm_uncertainty
         )
         
         return reward, {
-            "memory_divergence": memory_divergence,
+            "memory_divergence": memory_divergence_reward,
+            "memory_divergence_abs": current_divergence,
             "wm_uncertainty": wm_uncertainty,
         }
     
@@ -451,8 +530,8 @@ class StudentTrainer(BaseRLTrainer):
         """Execute one PPO training step."""
         self.optimizer.zero_grad()
         
-        # Forward pass
-        actions, log_probs, values = self._forward_student(batch)
+        # Forward pass (ignore memory_state during training)
+        actions, log_probs, values, _ = self._forward_student(batch)
         
         # PPO loss
         old_log_probs = batch["old_log_probs"]
@@ -593,6 +672,9 @@ def main():
     # Load RL config
     rl_config = load_rl_config(args.rl_config)
     
+    # Setup logging from config (must be done early)
+    setup_logging_from_config(rl_config)
+    
     # Apply command-line overrides
     if args.model_config:
         rl_config.model.config_file = args.model_config
@@ -653,6 +735,7 @@ def main():
         teacher_policy=teacher_policy,
         policy_config=policy_config,
         rl_config=rl_config,
+        model_config_file=model_config_file,
         device=device,
     )
     

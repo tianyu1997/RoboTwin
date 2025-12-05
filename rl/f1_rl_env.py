@@ -101,27 +101,34 @@ def load_embodiment_config(task_config: dict, base_dir: str = None) -> dict:
     # - string: "franka-panda"
     # - list: [left_name, right_name] or [left_name, right_name, y_offset]
     # - single-element list: ["franka-panda"] meaning dual-arm same
-    if isinstance(embodiment, (list, tuple)):
+    # Note: OmegaConf returns ListConfig which is not isinstance of list/tuple
+    # Use hasattr to check for list-like behavior
+    is_list_like = isinstance(embodiment, (list, tuple)) or hasattr(embodiment, '__iter__') and not isinstance(embodiment, str)
+    
+    if is_list_like:
+        # Convert to regular list for consistent handling
+        embodiment = list(embodiment)
+        
         # Normalize entries to strings where possible
         if len(embodiment) == 0:
             left_embodiment_name = "franka-panda"
             right_embodiment_name = "franka-panda"
             embodiment_dis = 0.6
         else:
-            left_embodiment_name = embodiment[0]
-            right_embodiment_name = embodiment[1] if len(embodiment) > 1 else left_embodiment_name
-            embodiment_dis = embodiment[2] if len(embodiment) > 2 else 0.6
+            left_embodiment_name = str(embodiment[0])
+            right_embodiment_name = str(embodiment[1]) if len(embodiment) > 1 else left_embodiment_name
+            embodiment_dis = float(embodiment[2]) if len(embodiment) > 2 else 0.6
 
         # If names were accidentally provided as lists, coerce to first element
-        if isinstance(left_embodiment_name, (list, tuple)):
-            left_embodiment_name = left_embodiment_name[0]
-        if isinstance(right_embodiment_name, (list, tuple)):
-            right_embodiment_name = right_embodiment_name[0]
+        if isinstance(left_embodiment_name, (list, tuple)) or (hasattr(left_embodiment_name, '__iter__') and not isinstance(left_embodiment_name, str)):
+            left_embodiment_name = str(list(left_embodiment_name)[0])
+        if isinstance(right_embodiment_name, (list, tuple)) or (hasattr(right_embodiment_name, '__iter__') and not isinstance(right_embodiment_name, str)):
+            right_embodiment_name = str(list(right_embodiment_name)[0])
 
         is_dual_arm = (left_embodiment_name == right_embodiment_name)
     else:
-        left_embodiment_name = embodiment
-        right_embodiment_name = embodiment
+        left_embodiment_name = str(embodiment)
+        right_embodiment_name = str(embodiment)
         embodiment_dis = 0.6
         is_dual_arm = True  # Single embodiment name means dual arm robot
     
@@ -247,7 +254,7 @@ class F1RLEnv(gym.Env):
         self,
         task_config: Dict[str, Any],
         phase: str = "teacher",  # "teacher" or "student"
-        history_length: int = 12,  # Must be >= obs_img_steps for World Model (default 12)
+        history_length: int = 12,  # Auto-calculated from n_obs_img_steps + (n_obs_img_steps-1)*stride
         max_steps: int = 50,
         device: str = "cuda",
         teacher_policy: Optional[Any] = None,  # For student phase
@@ -258,6 +265,8 @@ class F1RLEnv(gym.Env):
         max_reset_retries: int = 10,  # Max retries for UnstableError during reset
         action_scale: float = 1.0,  # Scale factor for action bounds (0-1), lower = smaller actions
         action_bounds: Optional[Dict[str, Tuple[float, float]]] = None,  # Custom action bounds override
+        single_arm: bool = False,  # Single arm mode: only use left arm
+        scene_reset_interval: int = 1,  # Regenerate scene every N episodes
     ):
         """
         Initialize F1 RL Environment.
@@ -265,7 +274,7 @@ class F1RLEnv(gym.Env):
         Args:
             task_config: Configuration for random_exploration task
             phase: Training phase - "teacher" or "student"
-            history_length: Number of history frames to keep
+            history_length: Number of history frames (auto-calculated from model config)
             max_steps: Maximum steps per episode
             device: Torch device
             teacher_policy: Pre-trained teacher policy (required for student phase)
@@ -278,6 +287,8 @@ class F1RLEnv(gym.Env):
                 - delta_qpos: {'joint': (low, high), 'gripper': (low, high)}
                 - delta_ee_pos: {'position': (low, high), 'gripper': (low, high)}
                 - delta_ee: {'position': (low, high), 'rotation': (low, high), 'gripper': (low, high)}
+            single_arm: If True, only use left arm, right arm actions are zeroed
+            scene_reset_interval: Regenerate scene every N episodes (1 = every episode, higher = faster)
         """
         super().__init__()
         
@@ -293,13 +304,11 @@ class F1RLEnv(gym.Env):
         self.max_reset_retries = max_reset_retries
         self.action_scale = np.clip(action_scale, 0.01, 1.0)  # Clamp to valid range
         self.custom_action_bounds = action_bounds
+        self.single_arm = single_arm
+        self.scene_reset_interval = max(1, scene_reset_interval)  # At least 1
         
         # Logger
         self.logger = get_env_logger()
-        self.logger.info(
-            f"F1RLEnv initializing: phase={phase}, history_length={history_length}, "
-            f"max_steps={max_steps}, image_size={image_size}, action_scale={self.action_scale}"
-        )
         
         # Task configuration
         self.task_config = task_config
@@ -327,7 +336,7 @@ class F1RLEnv(gym.Env):
         self.episode_reward = 0.0
         self.episode_count = 0
         
-        self.logger.info(f"F1RLEnv initialized successfully for phase: {phase}")
+        # Initialized successfully
         
     def _setup_task(self):
         """Setup the underlying task environment."""
@@ -384,7 +393,7 @@ class F1RLEnv(gym.Env):
                 # Scale other action bounds
                 scaled_bounds[key] = (low * self.action_scale, high * self.action_scale)
         
-        self.logger.info(
+        self.logger.debug(
             f"Action bounds (scale={self.action_scale}): {scaled_bounds}"
         )
         
@@ -451,25 +460,18 @@ class F1RLEnv(gym.Env):
             ),
         }
         
+        # Single arm: teacher uses head + wrist, student only uses wrist
         if self.phase == "teacher":
-            # Teacher uses head camera
             obs_dict["head_rgb"] = spaces.Box(
                 low=0, high=255,
                 shape=(self.history_length, 3, *self.image_size),
                 dtype=np.uint8
             )
-        else:
-            # Student uses wrist cameras only
-            obs_dict["left_wrist_rgb"] = spaces.Box(
-                low=0, high=255,
-                shape=(self.history_length, 3, *self.image_size),
-                dtype=np.uint8
-            )
-            obs_dict["right_wrist_rgb"] = spaces.Box(
-                low=0, high=255,
-                shape=(self.history_length, 3, *self.image_size),
-                dtype=np.uint8
-            )
+        obs_dict["wrist_rgb"] = spaces.Box(
+            low=0, high=255,
+            shape=(self.history_length, 3, *self.image_size),
+            dtype=np.uint8
+        )
             
         self.observation_space = spaces.Dict(obs_dict)
         
@@ -484,11 +486,10 @@ class F1RLEnv(gym.Env):
         # State history
         self.state_history = deque(maxlen=self.history_length)
         
-        # Image history
+        # Image history - head and wrist cameras
         self.image_history = {
             "head_rgb": deque(maxlen=self.history_length),
-            "left_wrist_rgb": deque(maxlen=self.history_length),
-            "right_wrist_rgb": deque(maxlen=self.history_length),
+            "wrist_rgb": deque(maxlen=self.history_length),
         }
         
     def _fill_history_with_initial_obs(self, initial_obs: Dict[str, Any]):
@@ -526,14 +527,19 @@ class F1RLEnv(gym.Env):
             if img.shape[:2] != self.image_size:
                 img = self._resize_image(img, self.image_size)
             result["head_rgb"] = img.transpose(2, 0, 1)  # HWC -> CHW
-            
-        # Wrist cameras
-        for key in ["left_wrist_rgb", "right_wrist_rgb"]:
+        
+        # Wrist camera - single arm uses "wrist_rgb" (from left_wrist_rgb or right_wrist_rgb)
+        wrist_key = None
+        for key in ["left_wrist_rgb", "right_wrist_rgb", "wrist_rgb"]:
             if key in obs:
-                img = obs[key]
-                if img.shape[:2] != self.image_size:
-                    img = self._resize_image(img, self.image_size)
-                result[key] = img.transpose(2, 0, 1)  # HWC -> CHW
+                wrist_key = key
+                break
+        
+        if wrist_key:
+            img = obs[wrist_key]
+            if img.shape[:2] != self.image_size:
+                img = self._resize_image(img, self.image_size)
+            result["wrist_rgb"] = img.transpose(2, 0, 1)  # HWC -> CHW
                 
         return result
     
@@ -554,11 +560,10 @@ class F1RLEnv(gym.Env):
         obs["action_history"] = np.stack(list(self.action_history), axis=0)
         
         # Image history based on phase
+        # Teacher gets head + wrist, student only gets wrist
         if self.phase == "teacher":
             obs["head_rgb"] = np.stack(list(self.image_history["head_rgb"]), axis=0)
-        else:
-            obs["left_wrist_rgb"] = np.stack(list(self.image_history["left_wrist_rgb"]), axis=0)
-            obs["right_wrist_rgb"] = np.stack(list(self.image_history["right_wrist_rgb"]), axis=0)
+        obs["wrist_rgb"] = np.stack(list(self.image_history["wrist_rgb"]), axis=0)
             
         return obs
     
@@ -571,8 +576,10 @@ class F1RLEnv(gym.Env):
         """
         Reset environment with retry logic for UnstableError.
         
-        The environment will retry with different seeds if objects are unstable,
-        up to max_reset_retries attempts.
+        This follows the collect_data.py pattern:
+        - Robot is loaded ONCE via setup_demo (first reset)
+        - Subsequent resets only reload scene objects via reset_for_new_episode
+        - On UnStableError, just try a new seed without destroying the task
         """
         super().reset(seed=seed)
         
@@ -582,26 +589,31 @@ class F1RLEnv(gym.Env):
         # Initialize seed counter
         current_seed = seed if seed is not None else np.random.randint(0, 2**31)
         
-        for retry in range(self.max_reset_retries):
-            try:
-                # Attempt to reset/create task
-                if self.task is None:
-                    config = self.task_config.copy()
-                    config["seed"] = current_seed
-                    config["render_mode"] = self.render_mode_str
-                    # Disable viewer for headless training (no display)
-                    config["render_freq"] = 0
-                    
-                    # Load embodiment configurations (required for robot setup)
-                    # rl/f1_rl_env.py -> RoboTwin
-                    robotwin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                    config = load_embodiment_config(config, base_dir=robotwin_dir)
-                    
-                    if retry == 0:
-                        self.logger.info(f"Loaded embodiment config: left={config.get('left_robot_file', 'N/A')}, right={config.get('right_robot_file', 'N/A')}")
-                        self.logger.debug(f"Config keys: {list(config.keys())}")
-                        self.logger.debug(f"Camera config: {config.get('camera', 'MISSING')}")
-                    
+        # First, initialize task if not yet created (load robot ONCE)
+        need_initial_setup = self.task is None
+        
+        if need_initial_setup:
+            config = self.task_config.copy()
+            config["seed"] = current_seed
+            config["render_mode"] = self.render_mode_str
+            # Disable viewer for headless training (no display)
+            config["render_freq"] = 0
+            
+            # Load embodiment configurations (required for robot setup)
+            # rl/f1_rl_env.py -> RoboTwin
+            robotwin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config = load_embodiment_config(config, base_dir=robotwin_dir)
+            
+            # First reset: load robot
+            if self.episode_count == 0:
+                self.logger.info("Loading robot (first reset)...")
+            
+            # Save config for later use in reset_for_new_episode
+            self._saved_config = config
+            
+            # Create task and load robot - this may fail with UnStableError on first setup
+            for retry in range(self.max_reset_retries):
+                try:
                     self.task = self.task_class()
                     self.task.setup_demo(**config)
                     
@@ -614,46 +626,77 @@ class F1RLEnv(gym.Env):
                         left_arm_dof=self.task.robot_info["left_arm_dof"],
                         right_arm_dof=self.task.robot_info["right_arm_dof"],
                         custom_bounds=custom_bounds,
+                        single_arm=self.single_arm,
                     )
                     self.state_normalizer = StateNormalizer(
                         control_mode=config.get("control_mode", "delta_qpos"),
                         left_arm_dof=self.task.robot_info["left_arm_dof"],
                         right_arm_dof=self.task.robot_info["right_arm_dof"],
                         joint_limits=self.task.robot_info["arm_joint_limits"],
+                        single_arm=self.single_arm,
                     )
-                else:
-                    # Reset existing task with new seed
-                    self.task.reset_for_new_episode(seed=current_seed)
-                
-                # If we reach here, reset was successful (no UnstableError)
-                break
-                
-            except UnStableError as e:
-                self.logger.debug(
-                    f"UnStableError on reset attempt {retry + 1}/{self.max_reset_retries}: {e}"
-                )
-                
-                # Try with a different seed
-                current_seed = np.random.randint(0, 2**31)
-                
-                # If task was partially created, close it and retry
-                if self.task is not None:
+                    
+                    # Robot loaded
+                    break  # Success
+                    
+                except UnStableError as e:
+                    self.logger.debug(
+                        f"UnStableError on initial setup attempt {retry + 1}/{self.max_reset_retries}: {e}"
+                    )
+                    # On initial setup failure, need to destroy and recreate
+                    if self.task is not None:
+                        try:
+                            self.task.close_env()
+                        except:
+                            pass
+                        self.task = None
+                    
+                    # Try with a different seed
+                    current_seed = np.random.randint(0, 2**31)
+                    config["seed"] = current_seed
+                    
+                    if retry == self.max_reset_retries - 1:
+                        self.logger.error(
+                            f"Failed to setup environment after {self.max_reset_retries} attempts "
+                            f"due to UnStableError"
+                        )
+                        raise RuntimeError(
+                            f"Environment setup failed after {self.max_reset_retries} attempts "
+                            f"due to unstable objects: {e}"
+                        )
+        else:
+            # Task already exists - decide whether to reset scene or just robot state
+            # Based on scene_reset_interval setting
+            should_reset_scene = (self.episode_count % self.scene_reset_interval == 0)
+            
+            if should_reset_scene:
+                # Full scene reset (regenerate objects)
+                # Full scene reset
+                for retry in range(self.max_reset_retries):
                     try:
-                        self.task.close_env()
-                    except:
-                        pass
-                    self.task = None
-                
-                # If all retries exhausted, raise the error
-                if retry == self.max_reset_retries - 1:
-                    self.logger.error(
-                        f"Failed to reset environment after {self.max_reset_retries} attempts "
-                        f"due to UnStableError"
-                    )
-                    raise RuntimeError(
-                        f"Environment reset failed after {self.max_reset_retries} attempts "
-                        f"due to unstable objects: {e}"
-                    )
+                        self.task.reset_for_new_episode(seed=current_seed)
+                        break  # Success
+                        
+                    except UnStableError as e:
+                        self.logger.debug(
+                            f"UnStableError on episode reset attempt {retry + 1}/{self.max_reset_retries}: {e}"
+                        )
+                        # Just try a new seed, DO NOT destroy the task
+                        current_seed = np.random.randint(0, 2**31)
+                        
+                        if retry == self.max_reset_retries - 1:
+                            self.logger.error(
+                                f"Failed to reset episode after {self.max_reset_retries} attempts "
+                                f"due to UnStableError"
+                            )
+                            raise RuntimeError(
+                                f"Episode reset failed after {self.max_reset_retries} attempts "
+                                f"due to unstable objects: {e}"
+                            )
+            else:
+                # Fast reset: only reset robot to home state, keep scene unchanged
+                # Fast reset (robot only)
+                self.task._reset_robot_only()
                     
         # Initialize history buffers
         self._init_history_buffers()
@@ -677,10 +720,12 @@ class F1RLEnv(gym.Env):
             "control_mode": self.task.control_mode,
         }
         
-        self.logger.info(
-            f"Episode {self.episode_count} reset: phase={self.phase}, "
-            f"embodiment={info['embodiment']}, control_mode={info['control_mode']}"
-        )
+        # Only log episode reset at INFO level for every 100th episode
+        if self.episode_count % 100 == 1:
+            self.logger.info(
+                f"Episode {self.episode_count}: phase={self.phase}, "
+                f"embodiment={info['embodiment']}, control_mode={info['control_mode']}"
+            )
         
         return obs, info
     
@@ -755,16 +800,16 @@ class F1RLEnv(gym.Env):
             **reward_info
         }
         
-        # Log step info periodically or at episode end
+        # Log step info periodically (only at DEBUG level to reduce noise)
         if self.current_step % 10 == 0 or truncated:
             self.logger.debug(
                 f"Step {self.current_step}: reward={reward:.4f}, "
-                f"episode_reward={self.episode_reward:.4f}, "
-                f"reward_info={reward_info}"
+                f"episode_reward={self.episode_reward:.4f}"
             )
         
+        # Episode finish log at DEBUG level - main training script will log summary
         if truncated:
-            self.logger.info(
+            self.logger.debug(
                 f"Episode {self.episode_count} finished: "
                 f"steps={self.current_step}, total_reward={self.episode_reward:.4f}"
             )
@@ -939,8 +984,25 @@ class F1RLEnv(gym.Env):
         action: np.ndarray,
         use_head_camera: bool = True,
     ) -> Dict[str, torch.Tensor]:
-        """Build batch dict for F1 policy forward pass."""
+        """Build batch dict for F1 policy forward pass.
+        
+        According to model requirements:
+        - LLM input: head_rgb (image0) + wrist_rgb (image1) single frames + state
+        - WM input: wrist_rgb history (n_obs_img_steps frames) + action history
+        
+        Args:
+            obs: Observation dict. Images can be either:
+                - Single frame [C, H, W] (from raw observation)
+                - Stacked history [T, C, H, W] (from _build_observation)
+            action: Action to take
+            use_head_camera: Whether to use head camera (True) or wrist cameras (False)
+        """
         batch = {}
+        
+        # World model needs n_obs_img_steps frames
+        # From debug_test.yaml: n_obs_img_steps=4, obs_img_stride=1
+        # So we need exactly 4 frames (no sampling needed when stride=1)
+        n_obs_frames = self.history_length  # Should be 4 (or 5 if including pred target)
         
         # State
         state_dict = self.task._get_current_state()
@@ -950,35 +1012,79 @@ class F1RLEnv(gym.Env):
         # Action
         batch["action"] = torch.from_numpy(action).float().unsqueeze(0).to(self.device)
         
-        # Action history
-        action_hist = np.stack(list(self.action_history), axis=0)
-        batch["action_history"] = torch.from_numpy(action_hist).float().unsqueeze(0).to(self.device)
+        # Action history - take the last n_obs_frames actions
+        action_hist = np.stack(list(self.action_history), axis=0)  # [history_length, action_dim]
+        # Take the most recent n_obs_frames (or all if less)
+        sampled_action_hist = action_hist[-n_obs_frames:]  # [n_obs_frames, action_dim]
+        batch["action_history"] = torch.from_numpy(sampled_action_hist).float().unsqueeze(0).to(self.device)
         
         # Images
-        def process_image(img):
-            """Process image to tensor in [-1, 1] range."""
-            img_tensor = torch.from_numpy(img).float().to(self.device)
-            img_tensor = img_tensor / 255.0 * 2.0 - 1.0  # Normalize to [-1, 1]
-            return img_tensor.unsqueeze(0)
+        def process_image(img, normalize=True):
+            """Process image to tensor.
             
-        if use_head_camera:
-            # Head camera observation
-            if "head_rgb" in obs:
-                batch["observation.images.image0"] = process_image(obs["head_rgb"])
-                batch["observation.images.image0_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
+            Args:
+                img: Either [C, H, W] or [T, C, H, W]
+                normalize: Whether to normalize to [-1, 1] range. Set False if 
+                          the policy will normalize it again.
+            Returns:
+                Tensor with batch dim: [1, C, H, W] or [1, T, C, H, W]
+            """
+            img_tensor = torch.from_numpy(img).float().to(self.device)
+            if normalize:
+                img_tensor = img_tensor / 255.0 * 2.0 - 1.0  # Normalize to [-1, 1]
+            else:
+                img_tensor = img_tensor / 255.0  # Normalize to [0, 1]
+            return img_tensor.unsqueeze(0)
+        
+        def get_current_and_history(img_data, history_deque):
+            """Extract current frame and history from image data.
+            
+            Returns:
+                current_img: [C, H, W]
+                hist_imgs: [n_obs_frames, C, H, W]
+            """
+            if img_data.ndim == 4:
+                # Stacked history [T, C, H, W]: use last frame for current
+                current_img = img_data[-1]  # [C, H, W]
+                # Take the most recent n_obs_frames
+                hist_imgs = img_data[-n_obs_frames:]  # [n_obs_frames, C, H, W]
+            else:
+                # Single image [C, H, W]
+                current_img = img_data
+                full_hist = np.stack(list(history_deque), axis=0)  # [history_length, C, H, W]
+                hist_imgs = full_hist[-n_obs_frames:]  # [n_obs_frames, C, H, W]
+            return current_img, hist_imgs
+        
+        # === LLM Inputs: images for Paligemma ===
+        # === WM Input: wrist_rgb history (image0_history for world model) ===
+        
+        # Get wrist camera data (always needed for WM)
+        if "wrist_rgb" in obs:
+            wrist_img = obs["wrist_rgb"]
+            current_wrist, hist_wrist = get_current_and_history(wrist_img, self.image_history["wrist_rgb"])
+            
+            # World model always needs wrist history
+            batch["observation.images.image0_history"] = process_image(hist_wrist, normalize=True)
+            
+            if use_head_camera:
+                # Teacher: head_rgb (image0) + wrist_rgb (image1)
+                # Head camera -> image0
+                if "head_rgb" in obs:
+                    head_img = obs["head_rgb"]
+                    if head_img.ndim == 4:
+                        current_head = head_img[-1]  # Last frame
+                    else:
+                        current_head = head_img
+                    batch["observation.images.image0"] = process_image(current_head, normalize=False)
+                    batch["observation.images.image0_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
                 
-                # History images
-                hist_imgs = np.stack(list(self.image_history["head_rgb"]), axis=0)
-                batch["observation.images.image0_history"] = process_image(hist_imgs)
-        else:
-            # Wrist camera observations only
-            if "left_wrist_rgb" in obs:
-                batch["observation.images.image1"] = process_image(obs["left_wrist_rgb"])
+                # Wrist camera -> image1
+                batch["observation.images.image1"] = process_image(current_wrist, normalize=False)
                 batch["observation.images.image1_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
-                
-            if "right_wrist_rgb" in obs:
-                batch["observation.images.image2"] = process_image(obs["right_wrist_rgb"])
-                batch["observation.images.image2_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
+            else:
+                # Student: wrist_rgb only (image0)
+                batch["observation.images.image0"] = process_image(current_wrist, normalize=False)
+                batch["observation.images.image0_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
                 
         # Task description (placeholder)
         batch["task"] = ["explore the environment"]

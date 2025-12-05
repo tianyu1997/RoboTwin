@@ -36,6 +36,72 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Logging Configuration
+# =============================================================================
+
+def setup_logging_from_config(config: DictConfig) -> None:
+    """
+    Setup logging based on config file settings.
+    
+    Args:
+        config: Full RL config with logging section
+    """
+    log_cfg = config.get("logging", {})
+    console_level = log_cfg.get("console_level", "WARNING").upper()
+    file_level = log_cfg.get("file_level", "DEBUG").upper()
+    enable_file = log_cfg.get("enable_file_logging", True)
+    
+    # Map string to logging level
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    
+    console_lvl = level_map.get(console_level, logging.WARNING)
+    file_lvl = level_map.get(file_level, logging.DEBUG)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)  # Capture all, let handlers filter
+    
+    # Remove existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(console_lvl)
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S'
+    ))
+    root_logger.addHandler(console_handler)
+    
+    # File handler (optional)
+    if enable_file:
+        os.makedirs("logs", exist_ok=True)
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_handler = logging.FileHandler(f"logs/rl_training_{timestamp}.log")
+        file_handler.setLevel(file_lvl)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        ))
+        root_logger.addHandler(file_handler)
+    
+    # Suppress verbose loggers from third-party libraries
+    for lib_name in ["curobo", "sapien", "warp", "nvdiffrast", "trimesh", 
+                     "PIL", "matplotlib", "urllib3"]:
+        logging.getLogger(lib_name).setLevel(logging.WARNING)
+    
+    # Use DEBUG level for this message since we're in setup
+    logger.debug(f"Logging configured: console={console_level}, file={file_level}")
+
+
+# =============================================================================
 # Configuration Dataclasses
 # =============================================================================
 
@@ -54,12 +120,10 @@ class LoRAConfig:
 class TrainingConfig:
     """Training configuration shared across phases."""
     # Dimensions
-    history_length: int = 12
     action_dim: int = 32
     state_dim: int = 32
     
-    # World model steps
-    n_obs_img_steps: int = 12
+    # World model steps (n_obs_img_steps and history_length will be loaded from model config)
     n_pred_img_steps: int = 3
     
     # Training params
@@ -94,9 +158,9 @@ class EnvironmentConfig:
     delta_qpos_scale: float = 0.05
     render_mode: str = "rasterize"
     num_objects: int = 5
-    embodiment: List = field(default_factory=lambda: ["franka-panda", "franka-panda", 0.6])
+    embodiment: List = field(default_factory=lambda: ["franka-panda"])  # Single arm
     
-    # Camera config
+    # Camera config - collect both cameras
     camera: Dict[str, Any] = field(default_factory=lambda: {
         "head_camera_type": "D435",
         "wrist_camera_type": "D435",
@@ -144,10 +208,8 @@ def get_training_config(config: DictConfig) -> TrainingConfig:
     """Extract training config from full config."""
     train_cfg = config.get("training", {})
     return TrainingConfig(
-        history_length=train_cfg.get("history_length", 12),
         action_dim=train_cfg.get("action_dim", 32),
         state_dim=train_cfg.get("state_dim", 32),
-        n_obs_img_steps=train_cfg.get("n_obs_img_steps", 12),
         n_pred_img_steps=train_cfg.get("n_pred_img_steps", 3),
         learning_rate=train_cfg.get("learning_rate", 1e-4),
         weight_decay=train_cfg.get("weight_decay", 1e-4),
@@ -163,6 +225,80 @@ def get_training_config(config: DictConfig) -> TrainingConfig:
         action_bounds_low=train_cfg.get("action_bounds", {}).get("low", -1.0),
         action_bounds_high=train_cfg.get("action_bounds", {}).get("high", 1.0),
     )
+
+
+def get_f1_flow_matching_model(policy):
+    """Get the F1FlowMatching model from policy, handling PEFT wrapping.
+    
+    When using PEFT/LoRA:
+    - policy is PeftModel
+    - policy.model is F1_VLA  
+    - policy.model.model is F1FlowMatching
+    
+    Without PEFT:
+    - policy is F1_VLA
+    - policy.model is F1FlowMatching
+    
+    Returns:
+        F1FlowMatching model instance
+    """
+    # Check if wrapped by PEFT
+    if hasattr(policy, 'model') and hasattr(policy.model, 'model'):
+        # PEFT wrapped: policy.model is F1_VLA, policy.model.model is F1FlowMatching
+        if hasattr(policy.model.model, 'set_requires_grad'):
+            return policy.model.model
+    
+    # Direct F1_VLA: policy.model is F1FlowMatching
+    if hasattr(policy, 'model') and hasattr(policy.model, 'set_requires_grad'):
+        return policy.model
+    
+    raise AttributeError(f"Cannot find F1FlowMatching model in {type(policy)}")
+
+
+class TrainingArgsAdapter:
+    """Adapter class to match F1FlowMatching.set_requires_grad expected interface."""
+    def __init__(
+        self,
+        freeze_vision_encoder: bool = True,
+        freeze_gen_expert: bool = False,
+        train_act_expert_only: bool = False,
+        train_gen_expert_only: bool = False,
+        train_state_proj: bool = True,
+    ):
+        self.freeze_vision_encoder = freeze_vision_encoder
+        self.freeze_gen_expert = freeze_gen_expert
+        self.train_act_expert_only = train_act_expert_only
+        self.train_gen_expert_only = train_gen_expert_only
+        self.train_state_proj = train_state_proj
+
+
+def set_policy_requires_grad(
+    policy,
+    freeze_vision_encoder: bool = True,
+    freeze_gen_expert: bool = False,
+    train_act_expert_only: bool = False,
+    train_gen_expert_only: bool = False,
+):
+    """Set requires_grad flags on F1 policy, handling PEFT wrapping.
+    
+    Args:
+        policy: F1_VLA or PeftModel wrapping F1_VLA
+        freeze_vision_encoder: Freeze vision encoder (saves VRAM, faster training)
+        freeze_gen_expert: Freeze world model expert
+        train_act_expert_only: Only train action expert
+        train_gen_expert_only: Only train world model expert
+    """
+    model = get_f1_flow_matching_model(policy)
+    
+    # Create adapter object that matches F1FlowMatching.set_requires_grad expected interface
+    training_args = TrainingArgsAdapter(
+        freeze_vision_encoder=freeze_vision_encoder,
+        freeze_gen_expert=freeze_gen_expert,
+        train_act_expert_only=train_act_expert_only,
+        train_gen_expert_only=train_gen_expert_only,
+        train_state_proj=not train_gen_expert_only,  # Freeze state_proj when training gen expert only
+    )
+    model.set_requires_grad(training_args)
 
 
 def get_environment_config(config: DictConfig, num_steps: Optional[int] = None) -> Dict[str, Any]:
@@ -187,6 +323,9 @@ def get_environment_config(config: DictConfig, num_steps: Optional[int] = None) 
         "delta_qpos_scale": env_cfg.get("delta_qpos_scale", 0.05),
         "render_mode": env_cfg.get("render_mode", "rasterize"),
         "embodiment": env_cfg.get("embodiment", ["franka-panda", "franka-panda", 0.6]),
+        # Single arm mode and scene reset interval
+        "single_arm": env_cfg.get("single_arm", False),
+        "scene_reset_interval": env_cfg.get("scene_reset_interval", 1),
         "camera": env_cfg.get("camera", {
             "head_camera_type": "D435",
             "wrist_camera_type": "D435",
@@ -239,15 +378,17 @@ def load_f1_policy(
     from f1_vla.src.utils.utils import load_ckpt, set_policy_config, unfreeze_memory_params
     
     # Load config from YAML
+    print("  Loading config file...")
     config = OmegaConf.load(Path(config_file))
     
     # Load F1Config and set policy config
+    print(f"  Loading F1Config from: {config.policy.ckpt_path}")
     policy_config = F1Config.from_pretrained(config.policy.ckpt_path)
     policy_config = set_policy_config(policy_config, config.policy)
     
-    logger.info(f"Policy config loaded from: {config.policy.ckpt_path}")
-    logger.info(f"Pretrained path: {policy_config.pretrained_path}")
-    logger.info(f"Use world model: {policy_config.use_world_model}")
+    logger.debug(f"Policy config loaded from: {config.policy.ckpt_path}")
+    logger.debug(f"Pretrained path: {policy_config.pretrained_path}")
+    logger.debug(f"Use world model: {policy_config.use_world_model}")
     
     # Create model
     kwargs = {
@@ -256,23 +397,25 @@ def load_f1_policy(
     }
     
     if policy_config.pretrained_path and not debug:
-        logger.info(f"Loading pretrained model from: {policy_config.pretrained_path}")
+        print(f"  Loading pretrained model from: {policy_config.pretrained_path}")
         policy = F1_VLA.from_pretrained(**kwargs)
+        print("  Loading additional checkpoint...")
         # Load additional checkpoint (e.g., world model weights)
         policy = load_ckpt(policy, config)
-        logger.info("Pretrained weights loaded successfully")
+        print("  Pretrained weights loaded successfully")
     else:
-        logger.info("Creating model from scratch (debug mode or no pretrained path)")
+        print("  Creating model from scratch (debug mode)")
         policy = F1_VLA(**kwargs)
     
     # Load additional checkpoint if specified
     if checkpoint_path and os.path.exists(checkpoint_path):
-        logger.info(f"Loading checkpoint from: {checkpoint_path}")
+        print(f"  Loading checkpoint from: {checkpoint_path}")
         load_config = OmegaConf.create({"exp": {"load_ckpt": checkpoint_path}})
         policy = load_ckpt(policy, load_config)
     
     # Apply LoRA if configured
     if lora_config is not None:
+        print("  Applying LoRA configuration...")
         from peft import get_peft_model, LoraConfig as PeftLoraConfig
         
         peft_config = PeftLoraConfig(
@@ -284,14 +427,16 @@ def load_f1_policy(
             task_type=lora_config.task_type,
         )
         policy = get_peft_model(policy, peft_config)
-        logger.info("Applied LoRA configuration")
+        logger.debug("Applied LoRA configuration")
     
     # Unfreeze memory-related parameters
     unfrozen = unfreeze_memory_params(policy)
-    logger.info(f"Unfrozen {len(unfrozen)} memory-related parameters")
+    print(f"  Unfrozen {len(unfrozen)} memory parameters")
     
     # Move to device
+    print(f"  Moving model to {device}...")
     policy = policy.to(device)
+    print("  Model ready!")
     
     return policy, policy_config, config
 
@@ -328,10 +473,12 @@ class BatchBuilder:
         device: str = "cuda",
         image_keys: List[str] = None,
         normalize_images: bool = True,
+        use_head_camera: bool = True,
     ):
         self.device = device
         self.image_keys = image_keys or ["head_rgb"]
         self.normalize_images = normalize_images
+        self.use_head_camera = use_head_camera
     
     def normalize_image(self, img: np.ndarray) -> torch.Tensor:
         """Normalize image from [0, 255] to [-1, 1]."""
@@ -366,9 +513,11 @@ class BatchBuilder:
         # Image containers
         images = {key: [] for key in self.image_keys}
         image_histories = {key: [] for key in self.image_keys}
+        next_images = {key: [] for key in self.image_keys}  # For world model prediction target
         
         for t in transitions:
             obs = t["obs"]
+            next_obs = t.get("next_obs", obs)  # Get next observation for prediction target
             
             # State
             states.append(obs["state"])
@@ -384,6 +533,9 @@ class BatchBuilder:
                     images[key].append(obs[key][-1])
                     # All frames as history
                     image_histories[key].append(obs[key])
+                    # Next frame as prediction target (from next_obs)
+                    if key in next_obs:
+                        next_images[key].append(next_obs[key][-1])
             
             # Action taken
             if "action" in t:
@@ -407,16 +559,28 @@ class BatchBuilder:
         # Process images
         for key in self.image_keys:
             if images[key]:
-                # Current images
+                # Current images for VLM
                 imgs = np.stack(images[key])
                 batch_key = f"observation.images.{self._get_image_index(key)}"
-                batch[batch_key] = self.normalize_image(imgs)
-                batch[f"{batch_key}_mask"] = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+                # Skip if mapped to "image_unused" (head camera in student mode)
+                if "unused" not in batch_key:
+                    batch[batch_key] = self.normalize_image(imgs)
+                    batch[f"{batch_key}_mask"] = torch.ones(batch_size, dtype=torch.bool, device=self.device)
                 
-                # History images
-                if image_histories[key]:
-                    hist_imgs = np.stack(image_histories[key])
-                    batch[f"{batch_key}_history"] = self.normalize_image(hist_imgs)
+                # History images + next frame for world model
+                # World model ALWAYS needs wrist_rgb history -> image0_history
+                # This is independent of use_head_camera setting
+                if key in ["wrist_rgb", "left_wrist_rgb"]:
+                    if image_histories[key] and next_images[key]:
+                        hist_imgs = np.stack(image_histories[key])  # [B, T, C, H, W]
+                        next_imgs = np.stack(next_images[key])      # [B, C, H, W]
+                        next_imgs = next_imgs[:, np.newaxis, :, :, :]  # [B, 1, C, H, W]
+                        # Concatenate: history + next frame
+                        combined_imgs = np.concatenate([hist_imgs, next_imgs], axis=1)  # [B, T+1, C, H, W]
+                        batch["observation.images.image0_history"] = self.normalize_image(combined_imgs)
+                    elif image_histories[key]:
+                        hist_imgs = np.stack(image_histories[key])
+                        batch["observation.images.image0_history"] = self.normalize_image(hist_imgs)
         
         # Task description
         batch["task"] = ["explore the environment\n"] * batch_size
@@ -429,12 +593,31 @@ class BatchBuilder:
         return batch
     
     def _get_image_index(self, key: str) -> str:
-        """Map image key to F1-VLA naming convention."""
-        key_map = {
-            "head_rgb": "image0",
-            "left_wrist_rgb": "image1",
-            "right_wrist_rgb": "image2",
-        }
+        """Map image key to F1-VLA naming convention.
+        
+        For Paligemma (VLM) input:
+        - Teacher (use_head_camera=True): head_rgb -> image0, wrist_rgb -> image1
+        - Student (use_head_camera=False): wrist_rgb -> image0
+        
+        For World Model:
+        - Always uses wrist_rgb history -> image0_history
+        """
+        if self.use_head_camera:
+            # Teacher: head_rgb (image0) + wrist_rgb (image1)
+            key_map = {
+                "head_rgb": "image0",           # Head camera -> image0 for VLM
+                "wrist_rgb": "image1",          # Wrist camera -> image1 for VLM
+                "left_wrist_rgb": "image1",
+                "right_wrist_rgb": "image2",
+            }
+        else:
+            # Student: wrist_rgb only (image0)
+            key_map = {
+                "head_rgb": "image_unused",     # Head camera not used
+                "wrist_rgb": "image0",          # Wrist camera -> image0 for VLM
+                "left_wrist_rgb": "image0",
+                "right_wrist_rgb": "image1",
+            }
         return key_map.get(key, key)
 
 
@@ -634,7 +817,7 @@ class BaseRLTrainer(ABC):
             state.update(extra_state)
         
         torch.save(state, checkpoint_dir / "trainer_state.pt")
-        logger.info(f"Saved checkpoint to {checkpoint_dir}")
+        logger.debug(f"Saved checkpoint to {checkpoint_dir}")
     
     def load_checkpoint(self, checkpoint_dir: str) -> int:
         """
@@ -649,13 +832,13 @@ class BaseRLTrainer(ABC):
         checkpoint_path = Path(checkpoint_dir)
         
         # Load PEFT adapter weights
-        logger.info(f"Loading checkpoint from {checkpoint_path}")
+        logger.debug(f"Loading checkpoint from {checkpoint_path}")
         
         try:
             adapter_config_path = checkpoint_path / "adapter_config.json"
             if adapter_config_path.exists():
                 self.policy.load_adapter(str(checkpoint_path), "default")
-                logger.info("Loaded PEFT adapter weights")
+                logger.debug("Loaded PEFT adapter weights")
         except Exception as e:
             logger.warning(f"Could not load PEFT adapter: {e}")
         
@@ -683,9 +866,9 @@ class BaseRLTrainer(ABC):
         for key, value in metrics_dict.items():
             self.writer.add_scalar(f"train/{key}", value, step)
         
-        # Console
+        # Console (only at debug level - use tqdm in training loop for console output)
         metrics_str = ", ".join(f"{k}={v:.4f}" for k, v in metrics_dict.items())
-        logger.info(f"Step {step}: {metrics_str}")
+        logger.debug(f"Step {step}: {metrics_str}")
 
 
 # =============================================================================

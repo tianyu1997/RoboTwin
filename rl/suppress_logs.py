@@ -83,6 +83,8 @@ class CuRoboLogFilter(logging.Filter):
         "USDParser failed to import",
         "NumExpr",
         "NUMEXPR",
+        "Batch mode enable graph",
+        "num_graph_seeds",
     ]
     
     def filter(self, record: logging.LogRecord) -> bool:

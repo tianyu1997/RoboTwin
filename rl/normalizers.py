@@ -103,6 +103,7 @@ class ActionNormalizer:
         left_arm_dof: int,
         right_arm_dof: int,
         custom_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
+        single_arm: bool = False,  # Single arm mode: only use left arm
     ):
         """
         Initialize the action normalizer.
@@ -112,16 +113,18 @@ class ActionNormalizer:
             left_arm_dof: Degrees of freedom for left arm
             right_arm_dof: Degrees of freedom for right arm
             custom_bounds: Optional custom action bounds
+            single_arm: If True, only use left arm, right arm is zeroed
         """
         self.control_mode = control_mode
         self.left_arm_dof = left_arm_dof
         self.right_arm_dof = right_arm_dof
+        self.single_arm = single_arm
         
         # Compute raw action dimension based on control mode
         self.raw_action_dim = self._compute_raw_action_dim()
         
-        # Setup bounds
-        self.bounds = self.DEFAULT_BOUNDS.get(control_mode, {})
+        # Setup bounds - IMPORTANT: copy to avoid modifying class defaults
+        self.bounds = self.DEFAULT_BOUNDS.get(control_mode, {}).copy()
         if custom_bounds:
             self.bounds.update(custom_bounds)
             
@@ -133,9 +136,9 @@ class ActionNormalizer:
         self.logger.info(
             f"ActionNormalizer initialized: control_mode={control_mode}, "
             f"left_dof={left_arm_dof}, right_dof={right_arm_dof}, "
-            f"raw_dim={self.raw_action_dim}"
+            f"raw_dim={self.raw_action_dim}, single_arm={single_arm}"
         )
-        self.logger.debug(f"Action bounds: {self.bounds}")
+        self.logger.info(f"Action bounds: {self.bounds}")
         
     def _compute_raw_action_dim(self) -> int:
         """Compute raw action dimension based on control mode and DOFs."""
@@ -238,10 +241,12 @@ class ActionNormalizer:
         # Pad to 32 dimensions
         padded = self._pad_to_32dim(normalized)
         
-        self.logger.debug(
-            f"Normalized action: raw_shape={raw_action.shape}, "
-            f"norm_range=[{normalized.min():.3f}, {normalized.max():.3f}]"
-        )
+        # Only log if DEBUG is enabled (avoids overhead)
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(
+                f"Normalized action: raw_shape={raw_action.shape}, "
+                f"norm_range=[{normalized.min():.3f}, {normalized.max():.3f}]"
+            )
         
         return padded.astype(np.float32)
     
@@ -362,11 +367,21 @@ class ActionNormalizer:
     
     def sample_random_action(self) -> np.ndarray:
         """Sample a random normalized action."""
-        return np.random.uniform(-1.0, 1.0, self.MAX_ACTION_DIM).astype(np.float32)
+        action = np.random.uniform(-1.0, 1.0, self.MAX_ACTION_DIM).astype(np.float32)
+        if self.single_arm:
+            # Zero out right arm portion (indices 9-17 for delta_qpos layout)
+            action[self.MAX_ARM_DIM + 1:2 * self.MAX_ARM_DIM + 2] = 0.0
+        return action
     
     def sample_random_raw_action(self) -> np.ndarray:
         """Sample a random raw action within bounds."""
-        return np.random.uniform(self.raw_low, self.raw_high).astype(np.float32)
+        action = np.random.uniform(self.raw_low, self.raw_high).astype(np.float32)
+        if self.single_arm:
+            # Zero out right arm portion in raw action
+            # Layout: [left_qpos(N), left_grip, right_qpos(N), right_grip]
+            right_start = self.left_arm_dof + 1
+            action[right_start:] = 0.0
+        return action
     
     def action_dict_to_vector(self, action_dict: Dict[str, Any]) -> np.ndarray:
         """Convert action dict from environment to raw action vector."""
@@ -408,6 +423,11 @@ class ActionNormalizer:
             idx += self.right_arm_dof
             right_grip = raw_action[idx]
             
+            # In single arm mode, zero out right arm
+            if self.single_arm:
+                right_qpos = np.zeros_like(right_qpos)
+                right_grip = 0.0
+            
             return {
                 'left_delta_qpos': left_qpos,
                 'left_delta_gripper': float(left_grip),
@@ -415,22 +435,40 @@ class ActionNormalizer:
                 'right_delta_gripper': float(right_grip),
             }
         elif self.control_mode == 'delta_ee_pos':
+            right_pos = raw_action[4:7]
+            right_grip = float(raw_action[7])
+            
+            # In single arm mode, zero out right arm
+            if self.single_arm:
+                right_pos = np.zeros(3, dtype=np.float32)
+                right_grip = 0.0
+            
             return {
                 'left_delta_pos': raw_action[0:3],
                 'left_delta_gripper': float(raw_action[3]),
-                'right_delta_pos': raw_action[4:7],
-                'right_delta_gripper': float(raw_action[7]),
+                'right_delta_pos': right_pos,
+                'right_delta_gripper': right_grip,
                 'left_delta_quat': np.array([1, 0, 0, 0], dtype=np.float32),
                 'right_delta_quat': np.array([1, 0, 0, 0], dtype=np.float32),
             }
         elif self.control_mode == 'delta_ee':
+            right_pos = raw_action[8:11]
+            right_quat = raw_action[11:15]
+            right_grip = float(raw_action[15])
+            
+            # In single arm mode, zero out right arm
+            if self.single_arm:
+                right_pos = np.zeros(3, dtype=np.float32)
+                right_quat = np.array([1, 0, 0, 0], dtype=np.float32)  # identity quat
+                right_grip = 0.0
+            
             return {
                 'left_delta_pos': raw_action[0:3],
                 'left_delta_quat': raw_action[3:7],
                 'left_delta_gripper': float(raw_action[7]),
-                'right_delta_pos': raw_action[8:11],
-                'right_delta_quat': raw_action[11:15],
-                'right_delta_gripper': float(raw_action[15]),
+                'right_delta_pos': right_pos,
+                'right_delta_quat': right_quat,
+                'right_delta_gripper': right_grip,
             }
         else:
             raise ValueError(f"Unknown control mode: {self.control_mode}")
@@ -467,6 +505,7 @@ class StateNormalizer:
         right_arm_dof: int,
         joint_limits: Optional[Dict[str, np.ndarray]] = None,
         workspace_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
+        single_arm: bool = False,  # Single arm mode: right arm state is zeroed
     ):
         """
         Initialize state normalizer.
@@ -477,12 +516,14 @@ class StateNormalizer:
             right_arm_dof: Right arm degrees of freedom
             joint_limits: Joint position limits for normalization
             workspace_bounds: Workspace bounds for EE position normalization
+            single_arm: If True, right arm state is zeroed
         """
         self.control_mode = control_mode
         self.left_arm_dof = left_arm_dof
         self.right_arm_dof = right_arm_dof
         self.joint_limits = joint_limits
         self.workspace_bounds = workspace_bounds or self.DEFAULT_WORKSPACE_BOUNDS
+        self.single_arm = single_arm
         
         # Compute raw state dimension
         self.raw_state_dim = self._compute_raw_state_dim()
@@ -492,11 +533,11 @@ class StateNormalizer:
         self.logger.info(
             f"StateNormalizer initialized: control_mode={control_mode}, "
             f"left_dof={left_arm_dof}, right_dof={right_arm_dof}, "
-            f"raw_dim={self.raw_state_dim}"
+            f"raw_dim={self.raw_state_dim}, single_arm={single_arm}"
         )
         if joint_limits:
-            self.logger.debug(f"Joint limits provided: {list(joint_limits.keys())}")
-        self.logger.debug(f"Workspace bounds: {self.workspace_bounds}")
+            self.logger.info(f"Joint limits provided: {list(joint_limits.keys())}")
+        self.logger.info(f"Workspace bounds: {self.workspace_bounds}")
         
     def _compute_raw_state_dim(self) -> int:
         """Compute raw state dimension based on control mode."""
@@ -572,10 +613,16 @@ class StateNormalizer:
             result[self.MAX_ARM_DIM + 4:self.MAX_ARM_DIM + 8] = right_quat
             result[2 * self.MAX_ARM_DIM + 1] = float(state_dict['right_gripper'])
         
-        self.logger.debug(
-            f"Normalized state: mode={self.control_mode}, "
-            f"output_range=[{result.min():.3f}, {result.max():.3f}]"
-        )
+        # In single arm mode, zero out right arm portion
+        if self.single_arm:
+            result[self.MAX_ARM_DIM + 1:2 * self.MAX_ARM_DIM + 2] = 0.0
+        
+        # Only log if DEBUG is enabled (avoids overhead)
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug(
+                f"Normalized state: mode={self.control_mode}, "
+                f"output_range=[{result.min():.3f}, {result.max():.3f}]"
+            )
             
         return result
     

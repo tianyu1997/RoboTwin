@@ -15,8 +15,17 @@ cd "$ROBOTWIN_DIR"
 
 # 配置
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-"7.0;7.5;8.0;8.6;8.9;9.0"}
+export CUROBO_LOG_LEVEL=${CUROBO_LOG_LEVEL:-"ERROR"}
+export PYTHONWARNINGS="ignore::UserWarning,ignore::DeprecationWarning"
+export MPLBACKEND=${MPLBACKEND:-"Agg"}
 CONDA_ENV=${CONDA_ENV:-f1}
 OUTPUT_BASE=${OUTPUT_BASE:-"./outputs"}
+
+# 过滤函数：过滤掉JIT编译等无关消息 (使用行缓冲避免输出阻塞)
+filter_output() {
+    stdbuf -oL -eL grep -v -E "(kinematics_fused_cu not found|geom_cu binary not found|tensor_step_cu not found|lbfgs_step_cu not found|line_search_cu not found|JIT compiling|jit compiling|TORCH_CUDA_ARCH_LIST|pkg_resources is deprecated|UserWarning)" || true
+}
 
 # 激活 conda 环境
 if command -v conda &> /dev/null; then
@@ -31,16 +40,26 @@ ADVERSARIAL_DIR="$OUTPUT_BASE/adversarial_rl"
 
 run_teacher() {
     echo "========== Phase 1: Teacher Training =========="
-    python "$SCRIPT_DIR/train_rl.py" --phase teacher --output_dir "$TEACHER_DIR" "$@"
+    echo "Note: First run may take 2-3 minutes for CUDA JIT compilation..."
+    # Run with unbuffered Python output and filter noisy JIT/compiler messages
+    python -u "$SCRIPT_DIR/train_teacher_rl.py" "$@" 2>&1 | filter_output
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -ne 0 ]; then
+        return $rc
+    fi
 }
 
 run_student() {
     local checkpoint="${1:-$TEACHER_DIR/checkpoint-latest}"
     shift 2>/dev/null || true
     echo "========== Phase 2: Student Training =========="
-    python "$SCRIPT_DIR/train_rl.py" --phase student \
+    python -u "$SCRIPT_DIR/train_rl.py" --phase student \
         --teacher_checkpoint "$checkpoint" \
-        --output_dir "$STUDENT_DIR" "$@"
+        --output_dir "$STUDENT_DIR" "$@" 2>&1 | filter_output
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -ne 0 ]; then
+        return $rc
+    fi
 }
 
 run_adversarial() {
@@ -50,7 +69,12 @@ run_adversarial() {
     echo "========== Phase 3: Adversarial Training =========="
     cmd="python $SCRIPT_DIR/train_rl.py --phase adversarial --teacher_checkpoint $teacher_ckpt --output_dir $ADVERSARIAL_DIR"
     [[ -n "$student_ckpt" ]] && cmd="$cmd --student_checkpoint $student_ckpt"
-    $cmd "$@"
+    # Run and filter output
+    eval "$cmd" 2>&1 | filter_output
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -ne 0 ]; then
+        return $rc
+    fi
 }
 
 run_all() {

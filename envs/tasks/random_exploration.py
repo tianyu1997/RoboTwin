@@ -173,6 +173,32 @@ class random_exploration(Base_Task):
         
         return True
     
+    def _reset_robot_only(self):
+        """
+        Reset robot state only without regenerating scene objects.
+        This is the fastest reset mode - only moves robot back to home position.
+        
+        Used when scene_reset_interval > 1 to speed up training.
+        """
+        # Reset robot to home state
+        self.robot.move_to_homestate()
+        
+        # Open grippers
+        render_freq = self.render_freq
+        self.render_freq = 0
+        self.together_open_gripper(save_freq=-1)
+        self.render_freq = render_freq
+        
+        # Randomize initial robot position (small variations)
+        self._randomize_robot_initial_state()
+        
+        # Reset tracking
+        self.executed_steps = 0
+        self.recorded_data = []
+        self.take_action_cnt = 0
+        
+        return True
+
     def _add_robot_prohibited_area(self):
         """Add robot base area to prohibited area."""
         # Robot base is roughly at center, add safety margin

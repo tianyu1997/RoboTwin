@@ -52,13 +52,16 @@ from rl.training.rl_training_common import (
     get_environment_config,
     get_lora_config_from_dict,
     load_f1_policy,
+    BatchBuilder,
     MemoryStateManager,
     clip_gradients,
+    setup_logging_from_config,
+    set_policy_requires_grad,
 )
 
-# Setup logging
+# Default logging (will be overridden by config)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -239,19 +242,23 @@ class WorldModelWrapper(nn.Module):
         self.device = device
         self.memory_manager = MemoryStateManager()
         
-        self._freeze_non_wm_params()
+        # Use proper gradient configuration
+        self._configure_for_wm_training()
     
-    def _freeze_non_wm_params(self):
-        """Freeze parameters that are not part of world model."""
-        for name, param in self.f1_policy.named_parameters():
-            if "world_model" not in name and "wm_" not in name:
-                param.requires_grad = False
+    def _configure_for_wm_training(self):
+        """Configure model for world model training only."""
+        # Use set_requires_grad for proper gradient configuration
+        set_policy_requires_grad(
+            self.f1_policy,
+            freeze_vision_encoder=True,   # Freeze vision encoder
+            freeze_gen_expert=False,      # Unfreeze world model
+            train_act_expert_only=False,
+            train_gen_expert_only=True,   # Only train world model
+        )
     
     def unfreeze_wm_params(self):
         """Unfreeze world model parameters for training."""
-        for name, param in self.f1_policy.named_parameters():
-            if "world_model" in name or "wm_" in name:
-                param.requires_grad = True
+        self._configure_for_wm_training()
     
     def reset_memory(self):
         """Reset memory state for new episode."""
@@ -298,6 +305,7 @@ class AdversarialTrainer:
         env,
         explorer: ExplorerPolicy,
         world_model: WorldModelWrapper,
+        model_config_file: str,
         device: str = "cuda",
     ):
         self.rl_config = rl_config
@@ -306,13 +314,34 @@ class AdversarialTrainer:
         self.world_model = world_model
         self.device = device
         
+        # Load model config to get n_obs_img_steps and stride
+        import yaml
+        with open(model_config_file, 'r') as f:
+            model_cfg = yaml.safe_load(f)
+        
+        train_datasets = model_cfg.get('dataset', {}).get('train_dir', {})
+        if not train_datasets:
+            raise ValueError("No train datasets found in model config")
+        
+        first_dataset = next(iter(train_datasets.values()))
+        self.n_obs_img_steps = first_dataset.get('n_obs_img_steps', 4)
+        self.obs_img_stride = first_dataset.get('obs_img_stride', 1)
+        
         # Get configs
         train_config = get_training_config(rl_config)
         adv_config = rl_config.get("adversarial", {})
         
-        self.cur_n_obs_img_steps = train_config.n_obs_img_steps
+        self.cur_n_obs_img_steps = self.n_obs_img_steps
         self.cur_n_pred_img_steps = train_config.n_pred_img_steps
         self.sequential_training = train_config.sequential_training
+        
+        # history_length is the observation buffer size
+        self.history_length = self.n_obs_img_steps
+        
+        print(f"Adversarial training config from {model_config_file}:")
+        print(f"  n_obs_img_steps: {self.n_obs_img_steps}")
+        print(f"  n_pred_img_steps: {self.cur_n_pred_img_steps}")
+        print(f"  history_length: {self.history_length}")
         
         # Training parameters
         self.batch_size = train_config.batch_size
@@ -321,6 +350,13 @@ class AdversarialTrainer:
         self.warmup_steps = adv_config.get("warmup_steps", 1000)
         self.adversarial_weight = adv_config.get("adversarial_weight", 0.5)
         self.entropy_weight = adv_config.get("entropy_weight", 0.01)
+        
+        # Batch builder - adversarial uses wrist camera only for VLM (like student)
+        self.batch_builder = BatchBuilder(
+            device=device,
+            image_keys=["head_rgb", "wrist_rgb"],
+            use_head_camera=False,  # Adversarial: wrist_rgb only (image0) for VLM
+        )
         
         # Optimizers
         self.explorer_optimizer = AdamW(
@@ -366,11 +402,17 @@ class AdversarialTrainer:
         episode_steps = 0
         
         for _ in range(num_steps):
-            # Get state and image
+            # Get state and image (use wrist_rgb for explorer input)
             state = torch.from_numpy(obs["state"]).float().to(self.device).unsqueeze(0)
             
-            if "left_wrist_rgb" in obs:
-                image = torch.from_numpy(obs["left_wrist_rgb"][-1]).float().to(self.device).unsqueeze(0)
+            # Get wrist camera image for explorer (VLM uses wrist only in adversarial phase)
+            wrist_key = "wrist_rgb" if "wrist_rgb" in obs else "left_wrist_rgb"
+            if wrist_key in obs:
+                wrist_img = obs[wrist_key]
+                # Handle both single frame and history
+                if wrist_img.ndim == 4:
+                    wrist_img = wrist_img[-1]  # Take last frame
+                image = torch.from_numpy(wrist_img).float().to(self.device).unsqueeze(0)
                 image = image / 255.0 * 2.0 - 1.0
             else:
                 image = torch.zeros(1, 3, 224, 224, device=self.device)
@@ -380,11 +422,12 @@ class AdversarialTrainer:
                 action, _ = self.explorer.sample_action(state, image)
                 action_np = action.cpu().numpy().flatten()
             
-            # Store observation before action
+            # Store observation before action (store both cameras for WM)
+            raw_obs = self.env.task.get_observation() if hasattr(self.env.task, 'get_observation') else obs
             obs_before = {
-                "head_rgb": self.env.task.get_observation().get(
-                    "head_rgb", np.zeros((224, 224, 3), dtype=np.uint8)
-                )
+                "head_rgb": raw_obs.get("head_rgb", np.zeros((3, 224, 224), dtype=np.uint8)),
+                "wrist_rgb": raw_obs.get("wrist_rgb", raw_obs.get("left_wrist_rgb", np.zeros((3, 224, 224), dtype=np.uint8))),
+                "wrist_rgb_history": obs.get("wrist_rgb", obs.get("left_wrist_rgb")),  # Full history
             }
             state_before = obs["state"].copy()
             memory_state_before = (
@@ -396,10 +439,10 @@ class AdversarialTrainer:
             next_obs, reward, terminated, truncated, info = self.env.step(action_np)
             
             # Store observation after action
+            raw_obs_after = self.env.task.get_observation() if hasattr(self.env.task, 'get_observation') else next_obs
             obs_after = {
-                "head_rgb": self.env.task.get_observation().get(
-                    "head_rgb", np.zeros((224, 224, 3), dtype=np.uint8)
-                )
+                "head_rgb": raw_obs_after.get("head_rgb", np.zeros((3, 224, 224), dtype=np.uint8)),
+                "wrist_rgb": raw_obs_after.get("wrist_rgb", raw_obs_after.get("left_wrist_rgb", np.zeros((3, 224, 224), dtype=np.uint8))),
             }
             state_after = next_obs["state"].copy()
             
@@ -434,18 +477,40 @@ class AdversarialTrainer:
         for _ in range(self.wm_updates_per_iter):
             batch_data = self.replay_buffer.sample(self.batch_size)
             
-            # Prepare tensors
-            obs_before_imgs = torch.stack([
-                torch.from_numpy(d["obs_before"]["head_rgb"]).float()
-                for d in batch_data
-            ]).to(self.device)
-            obs_before_imgs = obs_before_imgs.permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+            # Helper to process image: handle CHW (from env) or HWC formats
+            def process_image(img):
+                """Convert image to tensor, handling both CHW and HWC formats."""
+                if img is None:
+                    return torch.zeros(3, 224, 224, device=self.device)
+                img_t = torch.from_numpy(img).float().to(self.device)
+                # If HWC format, convert to CHW
+                if img_t.ndim == 3 and img_t.shape[-1] == 3:
+                    img_t = img_t.permute(2, 0, 1)
+                return img_t / 255.0 * 2.0 - 1.0  # Normalize to [-1, 1]
             
-            obs_after_imgs = torch.stack([
-                torch.from_numpy(d["obs_after"]["head_rgb"]).float()
+            # Use wrist_rgb for both VLM input and WM (adversarial phase)
+            # Current wrist image for VLM (image0)
+            obs_before_imgs = torch.stack([
+                process_image(d["obs_before"].get("wrist_rgb"))
                 for d in batch_data
-            ]).to(self.device)
-            obs_after_imgs = obs_after_imgs.permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+            ])
+            
+            # Ground truth next frame
+            obs_after_imgs = torch.stack([
+                process_image(d["obs_after"].get("wrist_rgb"))
+                for d in batch_data
+            ])
+            
+            # Image history for world model (if available)
+            wrist_histories = []
+            for d in batch_data:
+                hist = d["obs_before"].get("wrist_rgb_history")
+                if hist is not None and hist.ndim == 4:  # [T, C, H, W]
+                    hist_t = torch.from_numpy(hist).float().to(self.device) / 255.0 * 2.0 - 1.0
+                    wrist_histories.append(hist_t)
+                else:
+                    # Use current image repeated if no history
+                    wrist_histories.append(obs_before_imgs[len(wrist_histories)].unsqueeze(0).expand(self.n_obs_img_steps, -1, -1, -1))
             
             actions = torch.stack([
                 torch.from_numpy(d["action"]).float()
@@ -460,16 +525,20 @@ class AdversarialTrainer:
             # Memory states
             memory_states = [d.get("memory_state") for d in batch_data]
             
-            # Build batch
+            # Build batch with proper keys
             batch = {
-                "observation.images.image0": obs_before_imgs,
+                "observation.images.image0": obs_before_imgs,  # Current wrist for VLM
+                "observation.images.image0_mask": torch.ones(len(batch_data), dtype=torch.bool, device=self.device),
+                "observation.images.image0_history": torch.stack(wrist_histories),  # Wrist history for WM
                 "observation.state": states,
                 "action": actions,
+                "task": ["explore the environment\n"] * len(batch_data),
             }
             
             # Inject memory states if available
             if valid_states := [ms for ms in memory_states if ms is not None]:
-                batch["initial_memory_state"] = torch.stack(valid_states)
+                if len(valid_states) == len(batch_data):
+                    batch["initial_memory_state"] = torch.stack(valid_states)
             
             # Forward pass
             self.wm_optimizer.zero_grad()
@@ -501,18 +570,36 @@ class AdversarialTrainer:
         for _ in range(self.explorer_updates_per_iter):
             batch_data = self.replay_buffer.sample(self.batch_size)
             
-            # Prepare tensors
+            # Helper to process image
+            def process_image(img):
+                """Convert image to tensor, handling both CHW and HWC formats."""
+                if img is None:
+                    return torch.zeros(3, 224, 224, device=self.device)
+                img_t = torch.from_numpy(img).float().to(self.device)
+                if img_t.ndim == 3 and img_t.shape[-1] == 3:
+                    img_t = img_t.permute(2, 0, 1)
+                return img_t / 255.0 * 2.0 - 1.0
+            
+            # Use wrist_rgb for explorer (adversarial phase)
             obs_before_imgs = torch.stack([
-                torch.from_numpy(d["obs_before"]["head_rgb"]).float()
+                process_image(d["obs_before"].get("wrist_rgb"))
                 for d in batch_data
-            ]).to(self.device)
-            obs_before_imgs = obs_before_imgs.permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+            ])
             
             obs_after_imgs = torch.stack([
-                torch.from_numpy(d["obs_after"]["head_rgb"]).float()
+                process_image(d["obs_after"].get("wrist_rgb"))
                 for d in batch_data
-            ]).to(self.device)
-            obs_after_imgs = obs_after_imgs.permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+            ])
+            
+            # Image history for world model
+            wrist_histories = []
+            for d in batch_data:
+                hist = d["obs_before"].get("wrist_rgb_history")
+                if hist is not None and hist.ndim == 4:
+                    hist_t = torch.from_numpy(hist).float().to(self.device) / 255.0 * 2.0 - 1.0
+                    wrist_histories.append(hist_t)
+                else:
+                    wrist_histories.append(obs_before_imgs[len(wrist_histories)].unsqueeze(0).expand(self.n_obs_img_steps, -1, -1, -1))
             
             states = torch.stack([
                 torch.from_numpy(d["state_before"]).float()
@@ -530,11 +617,14 @@ class AdversarialTrainer:
             dist = torch.distributions.Normal(action_mean, action_std)
             entropy = dist.entropy().mean()
             
-            # Build batch for WM
+            # Build batch for WM with proper keys
             batch = {
                 "observation.images.image0": obs_before_imgs,
+                "observation.images.image0_mask": torch.ones(len(batch_data), dtype=torch.bool, device=self.device),
+                "observation.images.image0_history": torch.stack(wrist_histories),
                 "observation.state": states,
                 "action": actions,
+                "task": ["explore the environment\n"] * len(batch_data),
             }
             
             # Get WM prediction
@@ -667,6 +757,9 @@ def main():
     # Load RL config
     rl_config = load_rl_config(args.rl_config)
     
+    # Setup logging from config (must be done early)
+    setup_logging_from_config(rl_config)
+    
     # Apply overrides
     if args.model_config:
         rl_config.model.config_file = args.model_config
@@ -750,6 +843,7 @@ def main():
         env=env,
         explorer=explorer,
         world_model=world_model,
+        model_config_file=model_config_file,
         device=device,
     )
     

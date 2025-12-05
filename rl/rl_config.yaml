@@ -2,6 +2,17 @@
 # This config is shared across all three training phases
 
 # =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  # Console log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  console_level: "WARNING"
+  # File log level - set to WARNING to reduce file size
+  file_level: "WARNING"
+  # Enable/disable file logging
+  enable_file_logging: true
+
+# =============================================================================
 # Model Configuration
 # =============================================================================
 model:
@@ -20,17 +31,25 @@ model:
 # Environment Configuration
 # =============================================================================
 environment:
-  # Embodiment
-  embodiment: ["franka-panda", "franka-panda", 0.6]
+  # Embodiment - single arm
+  embodiment: ["franka-panda"]
+  
+  # Single arm mode: only use left arm, right arm is disabled
+  single_arm: true
+  
+  # Scene reset interval: only regenerate scene every N episodes
+  # This significantly speeds up training by reusing the same scene
+  # Set to 1 to regenerate scene every episode (slow)
+  scene_reset_interval: 50
   
   # Task settings
   task_name: "random_exploration"
   control_mode: "delta_qpos"
   delta_qpos_scale: 0.05
   render_mode: "rasterize"  # "rt" or "rasterize"
-  num_objects: 5
+  num_objects: 0
   
-  # Camera configuration
+  # Camera configuration - collect both cameras
   camera:
     head_camera_type: "D435"
     wrist_camera_type: "D435"
@@ -42,7 +61,7 @@ environment:
     random_appearance: false
     random_background: true
     random_light: true
-    cluttered_table: false
+    cluttered_table: true
   
   # Data type
   data_type:
@@ -56,13 +75,12 @@ environment:
 # =============================================================================
 training:
   # Dimensions
-  history_length: 12  # Must match n_obs_img_steps for World Model
   action_dim: 32
   state_dim: 32
   
-  # World model image steps
-  n_obs_img_steps: 12
-  n_pred_img_steps: 3
+  # World model configuration (read from debug_test.yaml)
+  # history_length will be auto-calculated as: n_obs_img_steps + (n_obs_img_steps - 1) * obs_img_stride
+  n_pred_img_steps: 1
   
   # Training parameters
   learning_rate: 1.0e-4
@@ -90,7 +108,7 @@ training:
   sequential_training: true
   
   # Action bounds
-  action_scale: 1.0  # Scale factor for action bounds (0.01-1.0)
+  action_scale: 0.05  # Scale factor for action bounds (0.01-1.0)
   action_bounds:
     low: -1.0
     high: 1.0
