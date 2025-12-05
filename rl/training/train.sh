@@ -6,6 +6,16 @@
 
 set -e
 
+# =============================================================================
+# Suppress verbose warnings for cleaner output
+# =============================================================================
+# Suppress HuggingFace tokenizers parallelism warning (safe to disable in subprocess)
+export TOKENIZERS_PARALLELISM=false
+# Suppress imageio ffmpeg warnings
+export IMAGEIO_FFMPEG_EXE_LOGGING=quiet
+# Filter Python warnings
+export PYTHONWARNINGS="ignore::UserWarning,ignore::DeprecationWarning"
+
 # Get script directory and project paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RL_DIR="$(dirname "$SCRIPT_DIR")"
@@ -17,8 +27,8 @@ cd "$ROBOTWIN_DIR"
 
 # Default values
 PHASE="${1:-teacher}"
-NUM_GPUS="${2:-1}"
-NUM_ENVS="${3:-1}"  # Environments per GPU
+NUM_GPUS="${2:-3}"
+NUM_ENVS="${3:-2}"  # Environments per GPU
 
 # Shift processed arguments
 shift 3 2>/dev/null || true

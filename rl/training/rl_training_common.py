@@ -695,9 +695,18 @@ class BatchBuilder:
         batch["task"] = ["explore the environment\n"] * batch_size
         
         # Memory states for sequential processing
+        # Note: If no memory states are provided, the trainer should initialize zeros
+        # We don't set initial_memory_state here - let the trainer handle initialization
         if include_memory_states and memory_states:
-            if valid_states := [s for s in memory_states if s is not None]:
-                batch["initial_memory_states_list"] = memory_states
+            valid_states = [s for s in memory_states if s is not None]
+            if valid_states:
+                # Stack valid memory states into a tensor
+                try:
+                    batch["initial_memory_state"] = torch.stack(valid_states)
+                    logger.debug(f"BatchBuilder: stacked {len(valid_states)} memory states")
+                except Exception as e:
+                    logger.warning(f"Failed to stack memory states: {e}")
+                    # Leave initial_memory_state unset, trainer will initialize
         
         return batch
     

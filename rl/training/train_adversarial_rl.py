@@ -271,14 +271,33 @@ class ExplorerPolicy(nn.Module):
 class WorldModelWrapper(nn.Module):
     """Wrapper around F1-VLA world model for adversarial training."""
     
-    def __init__(self, f1_policy: nn.Module, device: str = "cuda"):
+    def __init__(self, f1_policy: nn.Module, policy_config, device: str = "cuda"):
         super().__init__()
         self.f1_policy = f1_policy
         self.device = device
         self.memory_manager = MemoryStateManager()
         
+        # Memory configuration from model config (for GRU state)
+        self.memory_enabled = policy_config.memory_enabled if hasattr(policy_config, 'memory_enabled') else True
+        self.memory_hidden = policy_config.memory_hidden if hasattr(policy_config, 'memory_hidden') else 2048
+        self.memory_num_layers = policy_config.memory_num_layers if hasattr(policy_config, 'memory_num_layers') else 4
+        
+        logger.debug(f"WorldModelWrapper: memory_enabled={self.memory_enabled}, hidden={self.memory_hidden}, layers={self.memory_num_layers}")
+        
         # Use proper gradient configuration
         self._configure_for_wm_training()
+    
+    def _init_memory_state(self, batch_size: int) -> torch.Tensor:
+        """Initialize memory state to zeros for first frame."""
+        memory_state = torch.zeros(
+            self.memory_num_layers,
+            batch_size,
+            self.memory_hidden,
+            device=self.device,
+            dtype=torch.float32
+        )
+        logger.debug(f"WorldModelWrapper: initialized zero memory state: shape={memory_state.shape}")
+        return memory_state
     
     def _configure_for_wm_training(self):
         """Configure model for world model training only."""
@@ -304,15 +323,25 @@ class WorldModelWrapper(nn.Module):
         batch: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Predict next frame using world model."""
-        # Inject memory state
+        # Inject memory state - MUST initialize to zeros for first frame
         if self.memory_manager.current_memory is not None:
             batch["initial_memory_state"] = self.memory_manager.current_memory
+        else:
+            # First frame: initialize to zeros
+            batch_size = batch["observation.state"].shape[0]
+            batch["initial_memory_state"] = self._init_memory_state(batch_size)
+        
+        # Validate memory state is not None
+        if batch["initial_memory_state"] is None:
+            raise ValueError("CRITICAL: initial_memory_state is None in predict_next_frame!")
         
         output = self.f1_policy.predict_images_only(batch)
         
         # Update memory state
         if "memory_state" in output and output["memory_state"] is not None:
             self.memory_manager.update(output["memory_state"])
+        else:
+            logger.warning("predict_images_only returned None memory_state")
         
         return output["pred_imgs"]
     
@@ -958,8 +987,8 @@ def main():
             if accelerator is None or accelerator.is_main_process:
                 logger.info("Student explorer loaded successfully")
     
-    # Wrap world model
-    world_model = WorldModelWrapper(teacher_policy, device)
+    # Wrap world model (pass policy_config for memory configuration)
+    world_model = WorldModelWrapper(teacher_policy, policy_config, device)
     world_model.unfreeze_wm_params()
     
     # Sync before creating trainer

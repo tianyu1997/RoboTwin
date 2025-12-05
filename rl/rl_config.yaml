@@ -106,7 +106,7 @@ training:
   # Episode settings
   num_episodes: 10000
   steps_per_episode: 50
-  batch_size: 6
+  batch_size: 4
   
   # Logging & checkpointing
   log_every: 1
@@ -115,6 +115,15 @@ training:
   # Memory/Sequential processing
   # F1-VLA has memory_rnn that needs sequential state propagation
   sequential_training: true
+  # BPTT (Backpropagation Through Time) sequence length for memory training
+  # Longer sequences = better memory learning, but higher memory cost and gradient issues
+  # Recommended: 4-8 for stability, up to 16 if memory is sufficient
+  bptt_length: 16
+  # Enable gradient flow through memory states (requires sequential_training=true)
+  # When true, memory GRU can learn better encodings through backprop
+  # When false, memory state is detached each step (faster but memory doesn't improve)
+  # Note: Gradients only flow WITHIN each sequence (truncated BPTT), not across sequences
+  memory_backprop: true
   
   # Action bounds
   action_scale: 0.5  # Scale factor for action bounds (0.01-1.0)

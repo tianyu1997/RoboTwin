@@ -292,6 +292,13 @@ class StudentTrainer(BaseRLTrainer):
             use_head_camera=True,  # Teacher: head_rgb (image0) + wrist_rgb (image1)
         )
         
+        # Memory configuration from model config (for GRU state)
+        self.memory_enabled = policy_config.memory_enabled if hasattr(policy_config, 'memory_enabled') else True
+        self.memory_hidden = policy_config.memory_hidden if hasattr(policy_config, 'memory_hidden') else 2048
+        self.memory_num_layers = policy_config.memory_num_layers if hasattr(policy_config, 'memory_num_layers') else 4
+        
+        self._print(f"Memory config: enabled={self.memory_enabled}, hidden={self.memory_hidden}, layers={self.memory_num_layers}")
+        
         # Memory managers for student and teacher
         self.student_memory = MemoryStateManager()
         self.teacher_memory = MemoryStateManager()
@@ -311,6 +318,25 @@ class StudentTrainer(BaseRLTrainer):
             "wm_uncertainty": deque(maxlen=100),
             "episode_reward": deque(maxlen=100),
         })
+    
+    def _init_memory_state(self, batch_size: int) -> torch.Tensor:
+        """Initialize memory state to zeros for first frame.
+        
+        Args:
+            batch_size: Batch size
+            
+        Returns:
+            Zero-initialized memory state tensor of shape (num_layers, batch_size, hidden_dim)
+        """
+        memory_state = torch.zeros(
+            self.memory_num_layers,
+            batch_size,
+            self.memory_hidden,
+            device=self.device,
+            dtype=torch.float32
+        )
+        logger.debug(f"Student: initialized zero memory state: shape={memory_state.shape}")
+        return memory_state
     
     def _print(self, msg: str):
         """Print only on main process."""
@@ -373,7 +399,7 @@ class StudentTrainer(BaseRLTrainer):
         obs, info = self.env.reset()
         transitions = []
         
-        # Reset memory states
+        # Reset memory states (will be initialized to zeros on first step)
         self.student_memory.reset()
         self.teacher_memory.reset()
         self.prev_memory_divergence = 0.0
@@ -385,9 +411,13 @@ class StudentTrainer(BaseRLTrainer):
             # Build batch for student policy
             batch = self._obs_to_batch(obs)
             
-            # Inject student memory state
+            # Inject student memory state - MUST initialize to zeros for first frame
             if self.student_memory.current_memory is not None:
                 batch["initial_memory_state"] = self.student_memory.current_memory
+            else:
+                # First frame: initialize to zeros
+                batch["initial_memory_state"] = self._init_memory_state(batch_size=1)
+                logger.debug(f"Student episode: initialized zero memory for first frame")
             
             # Get action from student policy (also updates student memory)
             with torch.no_grad():
@@ -552,10 +582,13 @@ class StudentTrainer(BaseRLTrainer):
         student_memory_t1 = self.student_memory.current_memory
         
         # ===== Get teacher memory at t+1 =====
-        # Inject teacher memory state
+        # Inject teacher memory state - initialize to zeros if first frame
         teacher_batch = batch.copy()
         if self.teacher_memory.current_memory is not None:
             teacher_batch["initial_memory_state"] = self.teacher_memory.current_memory
+        else:
+            # First frame: initialize to zeros
+            teacher_batch["initial_memory_state"] = self._init_memory_state(batch_size=1)
         
         # Get teacher's world model prediction
         with torch.no_grad():
@@ -570,6 +603,8 @@ class StudentTrainer(BaseRLTrainer):
         teacher_memory_t1 = wm_output.get("memory_state")
         if teacher_memory_t1 is not None:
             self.teacher_memory.update(teacher_memory_t1)
+        else:
+            logger.warning("Teacher WM returned None memory_state")
         
         # ===== Compute memory divergence reward =====
         # r_mem = -(||h_student^{t+1} - h_teacher^{t+1}|| - ||h_student^t - h_teacher^t||)

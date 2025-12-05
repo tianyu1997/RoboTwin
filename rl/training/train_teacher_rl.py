@@ -158,6 +158,8 @@ def parse_args():
     # Resume training
     parser.add_argument("--resume", type=str, default=None,
                        help="Path to checkpoint directory to resume from")
+    parser.add_argument("--auto_resume", action="store_true", default=False,
+                       help="Automatically resume from latest checkpoint in output_dir")
     
     return parser.parse_args()
 
@@ -219,6 +221,13 @@ class WorldModelTrainer:
         # history_length is the observation buffer size (n_obs_img_steps)
         # The prediction target (next_obs) will be appended separately in batch building
         self.history_length = self.n_obs_img_steps
+        
+        # Memory configuration from model config (for GRU state)
+        self.memory_enabled = policy_config.memory_enabled if hasattr(policy_config, 'memory_enabled') else True
+        self.memory_hidden = policy_config.memory_hidden if hasattr(policy_config, 'memory_hidden') else 2048
+        self.memory_num_layers = policy_config.memory_num_layers if hasattr(policy_config, 'memory_num_layers') else 4
+        
+        self._print(f"Memory config: enabled={self.memory_enabled}, hidden={self.memory_hidden}, layers={self.memory_num_layers}")
         
         self._print(f"World model config from {model_config_file}:")
         self._print(f"  n_obs_img_steps: {self.n_obs_img_steps} (input frames)")
@@ -290,6 +299,21 @@ class WorldModelTrainer:
         
         # Batch size for training (larger batch = better GPU utilization)
         self.batch_size = self.config.batch_size
+        
+        # Sequential training configuration for BPTT (Backpropagation Through Time)
+        train_cfg = rl_config.get("training", {})
+        self.sequential_training = train_cfg.get("sequential_training", False)
+        self.bptt_length = train_cfg.get("bptt_length", 8)  # Truncated BPTT sequence length
+        self.memory_backprop = train_cfg.get("memory_backprop", False)
+        
+        # Enable memory_backprop in the model if configured
+        if self.memory_backprop:
+            policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
+            if hasattr(policy, 'model') and hasattr(policy.model, 'memory_backprop'):
+                policy.model.memory_backprop = True
+                self._print(f"Enabled memory_backprop in model for BPTT")
+        
+        self._print(f"Sequential training config: enabled={self.sequential_training}, bptt_length={self.bptt_length}, memory_backprop={self.memory_backprop}")
         
         # Replay buffer for accumulating transitions (use episode-based buffer)
         self.replay_buffer = SequentialEpisodeBuffer(max_episodes=500, max_transitions=10000)
@@ -463,14 +487,50 @@ class WorldModelTrainer:
         
         return trajectory
     
+    def _init_memory_state(self, batch_size: int) -> torch.Tensor:
+        """Initialize memory state to zeros for first frame.
+        
+        Args:
+            batch_size: Batch size
+            
+        Returns:
+            Zero-initialized memory state tensor of shape (num_layers, batch_size, hidden_dim)
+        """
+        memory_state = torch.zeros(
+            self.memory_num_layers,
+            batch_size,
+            self.memory_hidden,
+            device=self.device,
+            dtype=torch.float32
+        )
+        logger.debug(f"Initialized zero memory state: shape={memory_state.shape}")
+        return memory_state
+    
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """Execute one training step."""
+        """Execute one training step with memory state tracking."""
         self.optimizer.zero_grad()
         
         # Ensure model is in training mode (required for CuDNN RNN backward)
         # Unwrap if DDP wrapped
         policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
         policy.train()
+        
+        # Get batch size
+        batch_size = batch["observation.state"].shape[0]
+        
+        # Ensure memory state is present - CRITICAL: must not be None
+        if "initial_memory_state" not in batch or batch["initial_memory_state"] is None:
+            # Initialize to zeros for first frame
+            batch["initial_memory_state"] = self._init_memory_state(batch_size)
+            logger.debug(f"Memory state initialized to zeros for batch_size={batch_size}")
+        
+        # Validate memory state is not None
+        if batch["initial_memory_state"] is None:
+            raise ValueError("CRITICAL: initial_memory_state is None after initialization! This should never happen.")
+        
+        # Log memory state info (DEBUG level)
+        mem_state = batch["initial_memory_state"]
+        logger.debug(f"Memory state input: shape={mem_state.shape}, mean={mem_state.mean().item():.6f}, std={mem_state.std().item():.6f}")
         
         # Forward pass - predict next frame tokens
         loss_dict = policy.forward_with_world_model(
@@ -479,6 +539,15 @@ class WorldModelTrainer:
             cur_n_pred_img_steps=self.n_pred_img_steps,
             train_gen_expert_only=True,  # Only train world model
         )
+        
+        # Extract and validate output memory state
+        output_memory_state = loss_dict.get("memory_state")
+        if output_memory_state is not None:
+            logger.debug(f"Memory state output: shape={output_memory_state.shape}, mean={output_memory_state.mean().item():.6f}")
+            # Update memory manager with new state (detached)
+            self.memory_manager.update(output_memory_state.detach())
+        else:
+            logger.warning("Model returned None memory_state - this may indicate a problem")
         
         # Backward pass (use accelerator if available)
         loss = loss_dict["loss"]
@@ -500,6 +569,128 @@ class WorldModelTrainer:
         return {
             "loss": loss.item(),
             "accuracy": loss_dict.get("wm_acc_mean", torch.tensor(0.0)).item(),
+        }
+    
+    def train_step_sequential(self, sequences: List[List[Dict[str, Any]]]) -> Dict[str, float]:
+        """
+        Execute one training step with sequential transitions using truncated BPTT.
+        
+        This method processes transitions in temporal order within each sequence,
+        propagating memory states through time and allowing gradients to flow
+        through the memory RNN.
+        
+        Args:
+            sequences: List of sequences, each sequence is a list of consecutive transitions
+                       Shape: [batch_size, sequence_length, transition_dict]
+        
+        Returns:
+            Dictionary with loss and accuracy
+        """
+        self.optimizer.zero_grad()
+        
+        # Unwrap if DDP wrapped
+        policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
+        policy.train()
+        
+        batch_size = len(sequences)
+        seq_length = len(sequences[0]) if sequences else 0
+        
+        if seq_length == 0:
+            return {"loss": 0.0, "accuracy": 0.0}
+        
+        # Initialize memory state for the beginning of sequences
+        # Use the first transition's initial_memory_state if available, else zeros
+        # CRITICAL: Always detach at sequence START to prevent infinite graph growth
+        # Gradients only flow WITHIN a sequence (truncated BPTT), not across sequences
+        memory_state = None
+        first_transitions = [seq[0] for seq in sequences]
+        for t in first_transitions:
+            if t.get("initial_memory_state") is not None:
+                # Found a valid initial memory state
+                ms = t["initial_memory_state"]
+                if isinstance(ms, torch.Tensor):
+                    memory_state = ms.unsqueeze(0) if ms.dim() == 2 else ms
+                    # Detach to start fresh computation graph for this sequence
+                    memory_state = memory_state.detach()
+                    break
+        
+        if memory_state is None:
+            memory_state = self._init_memory_state(batch_size)
+        else:
+            memory_state = memory_state.detach()  # Ensure detached
+        
+        # Truncated BPTT: accumulate loss over the sequence, then backprop
+        total_loss = 0.0
+        total_acc = 0.0
+        valid_steps = 0
+        
+        for step_idx in range(seq_length):
+            # Gather transitions at this time step across all sequences
+            step_transitions = [seq[step_idx] for seq in sequences]
+            
+            # Build batch for this step
+            batch = self.batch_builder.build_batch(
+                step_transitions, include_memory_states=True
+            )
+            
+            # Override the initial_memory_state with our tracked memory
+            batch["initial_memory_state"] = memory_state.to(self.device)
+            
+            # Forward pass
+            loss_dict = policy.forward_with_world_model(
+                batch,
+                cur_n_obs_img_steps=self.n_obs_img_steps,
+                cur_n_pred_img_steps=self.n_pred_img_steps,
+                train_gen_expert_only=True,
+            )
+            
+            # Update memory state for next step
+            # When memory_backprop=True: keep gradients WITHIN this sequence for BPTT
+            # The initial state is already detached, so graph won't grow infinitely
+            output_memory_state = loss_dict.get("memory_state")
+            if output_memory_state is not None:
+                if self.memory_backprop and step_idx < seq_length - 1:
+                    # Keep gradients for next step within sequence (truncated BPTT)
+                    memory_state = output_memory_state
+                else:
+                    # Last step or memory_backprop=False: detach
+                    memory_state = output_memory_state.detach()
+            
+            # Accumulate loss
+            step_loss = loss_dict["loss"]
+            total_loss = total_loss + step_loss
+            total_acc += loss_dict.get("wm_acc_mean", torch.tensor(0.0)).item()
+            valid_steps += 1
+        
+        # Average loss over sequence
+        if valid_steps > 0:
+            avg_loss = total_loss / valid_steps
+        else:
+            avg_loss = total_loss
+        
+        # Backward pass (use accelerator if available)
+        if self.accelerator is not None:
+            self.accelerator.backward(avg_loss)
+        else:
+            avg_loss.backward()
+        
+        # Gradient clipping (important for BPTT stability)
+        if self.accelerator is not None:
+            self.accelerator.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm)
+        else:
+            clip_gradients(self.policy, max_norm=self.config.max_grad_norm)
+        
+        # Optimizer step
+        self.optimizer.step()
+        self.scheduler.step()
+        
+        # Update memory manager with final state (detached)
+        if output_memory_state is not None:
+            self.memory_manager.update(output_memory_state.detach())
+        
+        return {
+            "loss": avg_loss.item() if hasattr(avg_loss, 'item') else avg_loss,
+            "accuracy": total_acc / valid_steps if valid_steps > 0 else 0.0,
         }
     
     def train(self, start_episode: int = 0):
@@ -578,22 +769,41 @@ class WorldModelTrainer:
             num_train_steps = max(1, trajectory_len // self.batch_size)
             
             for _ in range(num_train_steps):
-                # Sample mini-batch from replay buffer
-                if len(self.replay_buffer) >= self.batch_size:
-                    # Random sample
-                    batch_transitions = self.replay_buffer.sample_batch(self.batch_size)
+                if self.sequential_training:
+                    # Sequential training with BPTT
+                    # Sample sequences of consecutive transitions
+                    if len(self.replay_buffer) >= self.batch_size * self.bptt_length:
+                        sequences = self.replay_buffer.sample_sequential_batch(
+                            batch_size=self.batch_size,
+                            sequence_length=self.bptt_length
+                        )
+                    else:
+                        # Not enough data for full sequences, use shorter ones
+                        available_seq_len = max(1, len(self.replay_buffer) // max(1, self.batch_size))
+                        sequences = self.replay_buffer.sample_sequential_batch(
+                            batch_size=min(self.batch_size, len(self.replay_buffer)),
+                            sequence_length=min(self.bptt_length, available_seq_len)
+                        )
+                    
+                    if not sequences:
+                        continue
+                    
+                    result = self.train_step_sequential(sequences)
                 else:
-                    # Use all available if buffer smaller than batch_size
-                    batch_transitions = self.replay_buffer.sample_batch(len(self.replay_buffer))
-                
-                if not batch_transitions:
-                    continue
-                
-                batch = self.batch_builder.build_batch(
-                    batch_transitions, include_memory_states=True
-                )
-                
-                result = self.train_step(batch)
+                    # Random batch training (original behavior)
+                    if len(self.replay_buffer) >= self.batch_size:
+                        batch_transitions = self.replay_buffer.sample_batch(self.batch_size)
+                    else:
+                        batch_transitions = self.replay_buffer.sample_batch(len(self.replay_buffer))
+                    
+                    if not batch_transitions:
+                        continue
+                    
+                    batch = self.batch_builder.build_batch(
+                        batch_transitions, include_memory_states=True
+                    )
+                    
+                    result = self.train_step(batch)
                 
                 ep_loss.append(result["loss"])
                 ep_acc.append(result["accuracy"])
@@ -704,18 +914,35 @@ class WorldModelTrainer:
         # Unwrap DDP model if needed
         policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
         
-        # Save model
+        # Save model state dict
         torch.save(policy.state_dict(), checkpoint_dir / "model.pt")
         
-        # Save optimizer & scheduler
-        torch.save({
+        # Save optimizer & scheduler & training state
+        training_state = {
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "episode": episode,
             "total_steps": self.metrics["total_steps"],
-        }, checkpoint_dir / "training_state.pt")
+            # Save training config for reference
+            "config": {
+                "sequential_training": self.sequential_training,
+                "bptt_length": self.bptt_length,
+                "memory_backprop": self.memory_backprop,
+                "batch_size": self.batch_size,
+                "n_obs_img_steps": self.n_obs_img_steps,
+                "n_pred_img_steps": self.n_pred_img_steps,
+            },
+        }
+        torch.save(training_state, checkpoint_dir / "training_state.pt")
         
-        logger.debug(f"Checkpoint saved: {checkpoint_dir}")
+        # Save recent metrics for reference
+        metrics_snapshot = {
+            "wm_loss": list(self.metrics["wm_loss"]),
+            "wm_accuracy": list(self.metrics["wm_accuracy"]),
+        }
+        torch.save(metrics_snapshot, checkpoint_dir / "metrics.pt")
+        
+        logger.info(f"Checkpoint saved: {checkpoint_dir}")
 
     def _save_prediction_sample(self, episode: int, obs_before: Dict[str, Any], action: Any, obs_after: Dict[str, Any]):
         """Run the world model to predict next image and save a side-by-side comparison with ground truth.
@@ -1017,15 +1244,23 @@ class WorldModelTrainer:
                 logger.warning(f"No valid frames to save for episode {episode}")
                 return
             
-            # Determine frame dimensions
+            # Determine frame dimensions and round to 16 (libx264 requires even, 16 is safe)
             h, w = gt_frames[0].shape[:2]
             
             # Layout: [Head | GT Wrist | Predicted]
             # Each panel is w x h, with 5px gaps between panels
             gap = 5
             label_h = 25
-            combined_w = w * 3 + gap * 2
-            combined_h = h + label_h
+            raw_combined_w = w * 3 + gap * 2
+            raw_combined_h = h + label_h
+            
+            # Round dimensions up to nearest multiple of 16 for libx264 compatibility
+            combined_w = ((raw_combined_w + 15) // 16) * 16
+            combined_h = ((raw_combined_h + 15) // 16) * 16
+            
+            # Calculate padding to center content
+            pad_x = (combined_w - raw_combined_w) // 2
+            pad_y = (combined_h - raw_combined_h) // 2
             
             # Use imageio for better compatibility
             import imageio
@@ -1036,10 +1271,12 @@ class WorldModelTrainer:
             
             num_frames = min(len(head_frames), len(gt_frames), len(pred_frames))
             for i in range(num_frames):
-                # Create combined frame (white background)
+                # Create combined frame (white background, padded to 16-multiple size)
                 combined = np.ones((combined_h, combined_w, 3), dtype=np.uint8) * 255
                 
-                x_offset = 0
+                # Start position with padding offset
+                x_offset = pad_x
+                y_offset = pad_y
                 
                 # Panel 1: Head Camera
                 if head_frames[i] is not None:
@@ -1047,8 +1284,8 @@ class WorldModelTrainer:
                     # Resize if needed
                     if head_frame.shape[:2] != (h, w):
                         head_frame = cv2.resize(head_frame, (w, h))
-                    combined[label_h:label_h+h, x_offset:x_offset+w] = head_frame
-                cv2.putText(combined, "Head", (x_offset + w//2 - 20, 18),
+                    combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = head_frame
+                cv2.putText(combined, "Head", (x_offset + w//2 - 20, y_offset + 18),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
                 x_offset += w + gap
                 
@@ -1056,8 +1293,8 @@ class WorldModelTrainer:
                 gt_frame = gt_frames[i]
                 if gt_frame.shape[:2] != (h, w):
                     gt_frame = cv2.resize(gt_frame, (w, h))
-                combined[label_h:label_h+h, x_offset:x_offset+w] = gt_frame
-                cv2.putText(combined, "GT Wrist", (x_offset + w//2 - 35, 18),
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = gt_frame
+                cv2.putText(combined, "GT Wrist", (x_offset + w//2 - 35, y_offset + 18),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 128, 0), 1)
                 x_offset += w + gap
                 
@@ -1065,8 +1302,8 @@ class WorldModelTrainer:
                 pred_frame = pred_frames[i]
                 if pred_frame.shape[:2] != (h, w):
                     pred_frame = cv2.resize(pred_frame, (w, h))
-                combined[label_h:label_h+h, x_offset:x_offset+w] = pred_frame
-                cv2.putText(combined, "Predicted", (x_offset + w//2 - 40, 18),
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = pred_frame
+                cv2.putText(combined, "Predicted", (x_offset + w//2 - 40, y_offset + 18),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
                 
                 # Write frame (imageio expects RGB)
@@ -1080,26 +1317,94 @@ class WorldModelTrainer:
         finally:
             policy.train()  # Restore training mode
 
+    def find_latest_checkpoint(self) -> Optional[Path]:
+        """Find the latest checkpoint in output_dir based on episode number.
+        
+        Returns:
+            Path to latest checkpoint directory, or None if no checkpoints found.
+        """
+        if not self.output_dir.exists():
+            return None
+        
+        checkpoints = []
+        for item in self.output_dir.iterdir():
+            if item.is_dir() and item.name.startswith("checkpoint-"):
+                try:
+                    episode = int(item.name.split("-")[1])
+                    checkpoints.append((episode, item))
+                except (ValueError, IndexError):
+                    continue
+        
+        if not checkpoints:
+            return None
+        
+        # Sort by episode number and return the latest
+        checkpoints.sort(key=lambda x: x[0], reverse=True)
+        latest = checkpoints[0][1]
+        logger.info(f"Found latest checkpoint: {latest}")
+        return latest
     
     def load_checkpoint(self, checkpoint_path: str) -> int:
-        """Load checkpoint and return starting episode."""
+        """Load checkpoint and return starting episode.
+        
+        Works correctly with DDP - all processes load the checkpoint.
+        """
         checkpoint_dir = Path(checkpoint_path)
         
-        # Load model
+        if not checkpoint_dir.exists():
+            logger.warning(f"Checkpoint directory not found: {checkpoint_dir}")
+            return 0
+        
+        # Unwrap DDP model if needed for loading
+        policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
+        
+        # Load model weights
         model_path = checkpoint_dir / "model.pt"
         if model_path.exists():
-            self.policy.load_state_dict(torch.load(model_path, map_location=self.device))
+            state_dict = torch.load(model_path, map_location=self.device)
+            # Handle potential key mismatches from DDP wrapping
+            policy.load_state_dict(state_dict, strict=False)
+            logger.info(f"Loaded model weights from: {model_path}")
+        else:
+            logger.warning(f"Model file not found: {model_path}")
         
-        # Load training state
+        # Load training state (optimizer, scheduler, etc.)
         state_path = checkpoint_dir / "training_state.pt"
+        start_episode = 0
         if state_path.exists():
             state = torch.load(state_path, map_location=self.device)
-            self.optimizer.load_state_dict(state["optimizer"])
-            self.scheduler.load_state_dict(state["scheduler"])
+            
+            # Load optimizer state
+            try:
+                self.optimizer.load_state_dict(state["optimizer"])
+                logger.info("Loaded optimizer state")
+            except Exception as e:
+                logger.warning(f"Could not load optimizer state: {e}")
+            
+            # Load scheduler state
+            try:
+                self.scheduler.load_state_dict(state["scheduler"])
+                logger.info("Loaded scheduler state")
+            except Exception as e:
+                logger.warning(f"Could not load scheduler state: {e}")
+            
+            # Restore metrics counter
             self.metrics["total_steps"] = state.get("total_steps", 0)
-            return state.get("episode", 0)
+            start_episode = state.get("episode", 0)
+            
+            # Log saved config for reference
+            saved_config = state.get("config", {})
+            if saved_config:
+                logger.info(f"Checkpoint was saved with config: {saved_config}")
+        else:
+            logger.warning(f"Training state file not found: {state_path}")
         
-        return 0
+        # Synchronize all processes after loading
+        if self.accelerator and self.accelerator.is_distributed:
+            self.accelerator.wait_for_everyone()
+        
+        logger.info(f"Resuming from episode {start_episode}")
+        return start_episode
 
 
 def main():
@@ -1192,10 +1497,22 @@ def main():
     
     # Resume if specified
     start_episode = 0
-    if args.resume:
+    resume_path = args.resume
+    
+    # Auto-resume: find latest checkpoint in output_dir
+    if args.auto_resume and not resume_path:
+        latest_ckpt = trainer.find_latest_checkpoint()
+        if latest_ckpt:
+            resume_path = str(latest_ckpt)
+            if accelerator.is_main_process:
+                print(f"Auto-resume: found latest checkpoint at {resume_path}")
+    
+    if resume_path:
         if accelerator.is_main_process:
-            print(f"Resuming from: {args.resume}")
-        start_episode = trainer.load_checkpoint(args.resume)
+            print(f"Resuming from: {resume_path}")
+        start_episode = trainer.load_checkpoint(resume_path)
+        if accelerator.is_main_process:
+            print(f"Resumed from episode {start_episode}")
     
     if accelerator.is_main_process:
         print("")  # Empty line before training

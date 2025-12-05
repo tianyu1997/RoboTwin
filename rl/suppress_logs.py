@@ -28,6 +28,13 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Suppress numexpr warnings
 warnings.filterwarnings("ignore", message=".*NumExpr.*")
 warnings.filterwarnings("ignore", message=".*NUMEXPR.*")
+# Suppress imageio ffmpeg warnings
+warnings.filterwarnings("ignore", message=".*IMAGEIO.*")
+warnings.filterwarnings("ignore", message=".*FFMPEG.*")
+warnings.filterwarnings("ignore", message=".*macro_block_size.*")
+# Suppress tokenizers parallelism warning
+warnings.filterwarnings("ignore", message=".*tokenizers.*")
+warnings.filterwarnings("ignore", message=".*parallelism.*")
 
 # ============== Logging level adjustments ==============
 # Suppress verbose logging from external libraries
@@ -45,6 +52,8 @@ _VERBOSE_LOGGERS = [
     "trimesh",
     "PIL",
     "numexpr",
+    "imageio",
+    "imageio_ffmpeg",
 ]
 
 for logger_name in _VERBOSE_LOGGERS:
