@@ -839,8 +839,8 @@ class F1RLEnv(gym.Env):
             pred_output = self.teacher_policy.predict_images_only(batch)
             pred_imgs = pred_output["pred_imgs"]  # [B, C, H, W]
             
-            # Get ground truth next image
-            gt_img = torch.from_numpy(obs_after["head_rgb"]).float().to(self.device)
+            # Get ground truth next image - World Model predicts wrist_rgb
+            gt_img = torch.from_numpy(obs_after["wrist_rgb"]).float().to(self.device)
             gt_img = gt_img.unsqueeze(0) / 255.0 * 2.0 - 1.0  # Normalize to [-1, 1]
             
             # Resize if needed
@@ -946,8 +946,9 @@ class F1RLEnv(gym.Env):
             # This encourages student to explore diverse states
             if "pred_imgs" in teacher_output_t1:
                 pred_imgs = teacher_output_t1["pred_imgs"]
+                # World Model predicts wrist_rgb, so GT should be wrist_rgb
                 gt_img = torch.from_numpy(
-                    obs_after.get("head_rgb", np.zeros((3, *self.image_size), dtype=np.uint8))
+                    obs_after.get("wrist_rgb", np.zeros((3, *self.image_size), dtype=np.uint8))
                 ).float().to(self.device)
                 gt_img = gt_img.unsqueeze(0) / 255.0 * 2.0 - 1.0
                 

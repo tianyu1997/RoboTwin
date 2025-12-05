@@ -474,18 +474,30 @@ class WorldModelTrainer:
                 pred = pred[:, -1]
             pred = pred[0]  # [C, H, W]
 
-            # Ground truth image (head camera from obs_after)
-            gt = obs_after.get("head_rgb")
+            # Ground truth image: World Model predicts wrist_rgb (image0_history)
+            # obs_after contains stacked history images with shape (T, C, H, W)
+            # We want the last frame (most recent observation) as prediction target
+            gt = obs_after.get("wrist_rgb")  # WM always uses wrist_rgb
             if gt is None:
-                gt = obs_after.get("wrist_rgb")
-            if gt is None:
+                logger.warning("No wrist_rgb in obs_after for GT comparison")
                 return
-            # gt is CHW (as in env._get_raw_observation produced CHW); convert to HWC uint8
+            
+            # Handle stacked history images: (T, C, H, W) -> take last frame -> (C, H, W)
             if isinstance(gt, np.ndarray):
-                if gt.shape[0] == 3:
+                # If 4D (T, C, H, W), take last frame
+                if gt.ndim == 4:
+                    gt = gt[-1]  # Take last frame: (C, H, W)
+                
+                # Now gt should be (C, H, W) with C=3 for RGB
+                if gt.ndim == 3 and gt.shape[0] == 3:
+                    # CHW -> HWC
                     gt_img = np.transpose(gt, (1, 2, 0)).astype(np.uint8)
-                else:
+                elif gt.ndim == 3 and gt.shape[2] == 3:
+                    # Already HWC
                     gt_img = gt.astype(np.uint8)
+                else:
+                    logger.warning(f"Unexpected gt shape after processing: {gt.shape}")
+                    return
             else:
                 # Fallback
                 gt_img = np.array(gt).astype(np.uint8)

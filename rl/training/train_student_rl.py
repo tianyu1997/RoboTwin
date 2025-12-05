@@ -336,35 +336,41 @@ class StudentTrainer(BaseRLTrainer):
         return transitions
     
     def _obs_to_batch(self, obs: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
-        """Convert observation dict to batch tensor dict."""
+        """Convert observation dict to batch tensor dict.
+        
+        Camera mapping:
+        - Teacher Paligemma: head_rgb (image0) + wrist_rgb (image1)
+        - Student Paligemma: wrist_rgb only (image0)
+        - World Model: always uses wrist_rgb history (image0_history)
+        """
         batch = {
             "observation.state": torch.from_numpy(obs["state"]).float().unsqueeze(0).to(self.device),
             "action_history": torch.from_numpy(obs["action_history"]).float().unsqueeze(0).to(self.device),
             "task": ["explore the environment\n"],
         }
         
-        # Wrist images (student observation)
-        if "left_wrist_rgb" in obs:
-            imgs = obs["left_wrist_rgb"][-1]
-            imgs = torch.from_numpy(imgs).float().to(self.device) / 255.0 * 2.0 - 1.0
-            batch["observation.images.image1"] = imgs.unsqueeze(0)
-            batch["observation.images.image1_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
-        
-        if "right_wrist_rgb" in obs:
-            imgs = obs["right_wrist_rgb"][-1]
-            imgs = torch.from_numpy(imgs).float().to(self.device) / 255.0 * 2.0 - 1.0
-            batch["observation.images.image2"] = imgs.unsqueeze(0)
-            batch["observation.images.image2_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
-        
-        # Head images (for teacher WM)
-        if "head_rgb" in obs:
-            imgs = obs["head_rgb"][-1]
-            imgs = torch.from_numpy(imgs).float().to(self.device) / 255.0 * 2.0 - 1.0
-            batch["observation.images.image0"] = imgs.unsqueeze(0)
-            batch["observation.images.image0_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
+        # Wrist camera for World Model history (always wrist_rgb -> image0_history)
+        if "wrist_rgb" in obs:
+            wrist_imgs = obs["wrist_rgb"]
+            current_wrist = wrist_imgs[-1]  # Last frame for current observation
+            
+            # World Model uses wrist_rgb history
             batch["observation.images.image0_history"] = (
-                torch.from_numpy(obs["head_rgb"]).float().to(self.device) / 255.0 * 2.0 - 1.0
+                torch.from_numpy(wrist_imgs).float().to(self.device) / 255.0 * 2.0 - 1.0
             ).unsqueeze(0)
+            
+            # Student uses wrist_rgb as image0 for Paligemma
+            batch["observation.images.image0"] = (
+                torch.from_numpy(current_wrist).float().to(self.device) / 255.0 * 2.0 - 1.0
+            ).unsqueeze(0)
+            batch["observation.images.image0_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
+        
+        # For teacher batch (if needed), add head_rgb as image0, wrist_rgb as image1
+        if "head_rgb" in obs:
+            head_imgs = obs["head_rgb"]
+            current_head = head_imgs[-1]
+            # Teacher uses head_rgb (image0) + wrist_rgb (image1)
+            # But we need separate teacher_batch for this
         
         return batch
     
