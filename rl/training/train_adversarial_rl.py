@@ -33,7 +33,7 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 import argparse
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Callable
 from collections import deque
 
 import numpy as np
@@ -57,6 +57,15 @@ from rl.training.rl_training_common import (
     clip_gradients,
     setup_logging_from_config,
     set_policy_requires_grad,
+)
+
+# Import parallel training utilities
+from rl.training.parallel_utils import (
+    AcceleratorWrapper,
+    create_accelerator,
+    SequentialEpisodeBuffer,
+    ParallelEnvCollector,
+    print_rank0,
 )
 
 # Default logging (will be overridden by config)
@@ -98,6 +107,12 @@ def parse_args():
     # Resume training
     parser.add_argument("--resume", type=str, default=None,
                        help="Resume adversarial training from checkpoint")
+    
+    # DDP and multi-environment options
+    parser.add_argument("--num_envs", type=int, default=1,
+                       help="Number of parallel environments for data collection")
+    parser.add_argument("--use_ddp", action="store_true",
+                       help="Use distributed data parallel training")
     
     return parser.parse_args()
 
@@ -297,7 +312,12 @@ class WorldModelWrapper(nn.Module):
 # =============================================================================
 
 class AdversarialTrainer:
-    """Adversarial trainer for WM vs Explorer."""
+    """
+    Adversarial trainer for WM vs Explorer.
+    
+    Supports DDP via HuggingFace Accelerate and multi-environment collection
+    via gymnasium's SyncVectorEnv.
+    """
     
     def __init__(
         self,
@@ -307,12 +327,16 @@ class AdversarialTrainer:
         world_model: WorldModelWrapper,
         model_config_file: str,
         device: str = "cuda",
+        accelerator: Optional[AcceleratorWrapper] = None,
+        num_envs: int = 1,
     ):
         self.rl_config = rl_config
         self.env = env
         self.explorer = explorer
         self.world_model = world_model
         self.device = device
+        self.accelerator = accelerator
+        self.num_envs = num_envs
         
         # Load model config to get n_obs_img_steps and stride
         import yaml
@@ -375,16 +399,64 @@ class AdversarialTrainer:
         self.explorer_scheduler = CosineAnnealingLR(self.explorer_optimizer, T_max=total_iterations)
         self.wm_scheduler = CosineAnnealingLR(self.wm_optimizer, T_max=total_iterations)
         
-        # Replay buffer
-        self.replay_buffer = ReplayBuffer(capacity=adv_config.get("buffer_size", 100000))
+        # Prepare for DDP if accelerator is provided
+        if self.accelerator is not None:
+            # Prepare explorer and its optimizer
+            self.explorer, self.explorer_optimizer, self.explorer_scheduler = self.accelerator.prepare(
+                self.explorer, self.explorer_optimizer, self.explorer_scheduler
+            )
+            # Prepare WM and its optimizer
+            self.world_model, self.wm_optimizer, self.wm_scheduler = self.accelerator.prepare(
+                self.world_model, self.wm_optimizer, self.wm_scheduler
+            )
+            self._print(f"DDP setup complete: {self.accelerator.num_processes} processes")
+        
+        # Replay buffer (uses SequentialEpisodeBuffer for parallel collection)
+        if self.num_envs > 1:
+            self.replay_buffer = SequentialEpisodeBuffer(
+                max_episodes=1000, max_transitions=100000
+            )
+        else:
+            self.replay_buffer = ReplayBuffer(capacity=adv_config.get("buffer_size", 100000))
         
         # Memory manager for episode collection
         self.memory_manager = MemoryStateManager()
         
-        # Logging
+        # Multi-env collector
+        self.env_collector = None  # Set in setup_multi_env if needed
+        
+        # Logging (only on main process)
         self.output_dir = Path(adv_config.get("output_dir", "outputs/adversarial_rl"))
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.writer = SummaryWriter(self.output_dir / "tensorboard")
+        if self._is_main_process():
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.writer = SummaryWriter(self.output_dir / "tensorboard")
+        else:
+            self.writer = None
+        
+        # Tracking
+        self.global_step = 0
+        self.episode_count = 0
+    
+    def _print(self, msg: str):
+        """Print only on main process."""
+        if self._is_main_process():
+            logger.info(msg)
+    
+    def _is_main_process(self) -> bool:
+        """Check if this is the main process."""
+        if self.accelerator is None:
+            return True
+        return self.accelerator.is_main_process
+    
+    def setup_multi_env(self, env_fn: Callable):
+        """Setup multi-environment collector."""
+        if self.num_envs > 1:
+            self.env_collector = ParallelEnvCollector(
+                env_fn=env_fn,
+                num_envs=self.num_envs,
+            )
+            self.env_collector.initialize()
+            self._print(f"Multi-env collector setup: {self.num_envs} envs")
         
         # Tracking
         self.global_step = 0
@@ -774,12 +846,22 @@ def main():
     if args.debug is not None:
         rl_config.debug = args.debug
     
-    device = rl_config.get("device", "cuda")
-    debug = rl_config.get("debug", False)
+    # Create accelerator for DDP if requested
+    accelerator = None
+    if args.use_ddp:
+        accelerator = create_accelerator(mixed_precision="no")
+        device = str(accelerator.device)
+        accelerator.print("=" * 70)
+        accelerator.print("Adversarial Training (Phase 3) - DDP Mode")
+        accelerator.print(f"Number of processes: {accelerator.num_processes}")
+        accelerator.print("=" * 70)
+    else:
+        device = rl_config.get("device", "cuda")
+        logger.info("=" * 70)
+        logger.info("Adversarial Training (Phase 3)")
+        logger.info("=" * 70)
     
-    logger.info("=" * 70)
-    logger.info("Adversarial Training (Phase 3)")
-    logger.info("=" * 70)
+    debug = rl_config.get("debug", False)
     
     # Load model config
     model_config_file = rl_config.get("model", {}).get(
@@ -791,7 +873,8 @@ def main():
     lora_config = get_lora_config_from_dict(rl_config)
     
     # Load teacher policy
-    logger.info(f"Loading teacher policy from: {args.teacher_checkpoint}")
+    if accelerator is None or accelerator.is_main_process:
+        logger.info(f"Loading teacher policy from: {args.teacher_checkpoint}")
     teacher_policy, policy_config, model_config = load_f1_policy(
         config_file=model_config_file,
         device=device,
@@ -806,13 +889,16 @@ def main():
     env_config = get_environment_config(rl_config)
     train_config = get_training_config(rl_config)
     
-    env = F1RLEnv(
-        task_config=env_config,
-        phase="student",
-        teacher_policy=teacher_policy,
-        device=device,
-        max_steps=train_config.steps_per_episode,
-    )
+    def make_env():
+        return F1RLEnv(
+            task_config=env_config,
+            phase="student",
+            teacher_policy=teacher_policy,
+            device=device,
+            max_steps=train_config.steps_per_episode,
+        )
+    
+    env = make_env()
     
     # Create explorer
     adv_config = rl_config.get("adversarial", {})
@@ -827,17 +913,23 @@ def main():
     
     # Load student checkpoint if provided
     if args.student_checkpoint:
-        logger.info(f"Loading student explorer from: {args.student_checkpoint}")
+        if accelerator is None or accelerator.is_main_process:
+            logger.info(f"Loading student explorer from: {args.student_checkpoint}")
         explorer_path = Path(args.student_checkpoint) / "explorer.pt"
         if explorer_path.exists():
             explorer.load_state_dict(torch.load(explorer_path, map_location=device))
-            logger.info("Student explorer loaded successfully")
+            if accelerator is None or accelerator.is_main_process:
+                logger.info("Student explorer loaded successfully")
     
     # Wrap world model
     world_model = WorldModelWrapper(teacher_policy, device)
     world_model.unfreeze_wm_params()
     
-    # Create trainer
+    # Sync before creating trainer
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    
+    # Create trainer with accelerator and num_envs
     trainer = AdversarialTrainer(
         rl_config=rl_config,
         env=env,
@@ -845,12 +937,19 @@ def main():
         world_model=world_model,
         model_config_file=model_config_file,
         device=device,
+        accelerator=accelerator,
+        num_envs=args.num_envs,
     )
+    
+    # Setup multi-env if needed
+    if args.num_envs > 1:
+        trainer.setup_multi_env(make_env)
     
     # Resume if specified
     start_iteration = 0
     if args.resume:
-        logger.info(f"Resuming from {args.resume}")
+        if accelerator is None or accelerator.is_main_process:
+            logger.info(f"Resuming from {args.resume}")
         start_iteration = trainer.load_checkpoint(args.resume)
     
     # Train
@@ -859,6 +958,8 @@ def main():
     
     # Cleanup
     env.close()
+    if trainer.env_collector is not None:
+        trainer.env_collector.close()
 
 
 if __name__ == "__main__":

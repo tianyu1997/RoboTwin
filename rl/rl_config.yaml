@@ -5,10 +5,11 @@
 # Logging Configuration
 # =============================================================================
 logging:
-  # Console log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  console_level: "WARNING"
+  # Console log level for main process: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # Non-main processes (other GPUs in DDP) always use WARNING to reduce noise
+  console_level: "INFO"
   # File log level - set to WARNING to reduce file size
-  file_level: "WARNING"
+  file_level: "CRITICAL"
   # Enable/disable file logging
   enable_file_logging: true
 
@@ -41,6 +42,14 @@ environment:
   # This significantly speeds up training by reusing the same scene
   # Set to 1 to regenerate scene every episode (slow)
   scene_reset_interval: 50
+  randomize_robot_init: false
+  
+  # Motion planner settings (for RL training, disable to save time and GPU memory)
+  # need_planner: false = skip CuRobo motion planner initialization (saves ~10GB VRAM)
+  # need_topp: false = skip MplibPlanner initialization
+  # These are only needed for trajectory planning, not for delta action control
+  need_planner: false
+  need_topp: false
   
   # Task settings
   task_name: "random_exploration"
@@ -97,10 +106,10 @@ training:
   # Episode settings
   num_episodes: 10000
   steps_per_episode: 50
-  batch_size: 8
+  batch_size: 6
   
   # Logging & checkpointing
-  log_every: 10
+  log_every: 1
   save_every: 1000
   
   # Memory/Sequential processing
@@ -108,10 +117,13 @@ training:
   sequential_training: true
   
   # Action bounds
-  action_scale: 0.05  # Scale factor for action bounds (0.01-1.0)
+  action_scale: 0.5  # Scale factor for action bounds (0.01-1.0)
   action_bounds:
     low: -1.0
     high: 1.0
+  # How often to save videos and sample images (1 = every episode)
+  video_save_every: 1
+  sample_save_every: 1
 
 # =============================================================================
 # Phase 1: Teacher Training Configuration

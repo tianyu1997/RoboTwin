@@ -75,6 +75,10 @@ class random_exploration(Base_Task):
             raise ValueError(f"Unknown control_mode: {self.control_mode}. "
                            f"Supported: {list(self.CONTROL_MODES.keys())}")
         
+        # Whether to randomize robot initial position (default True for data collection)
+        # Set to False for debugging or when using fixed camera views
+        self.randomize_robot_init = kwargs.get("randomize_robot_init", True)
+        
         # Exploration parameters
         self.num_random_steps = kwargs.get("num_random_steps", 100)
         self.num_objects = kwargs.get("num_objects", 5)
@@ -389,7 +393,13 @@ class random_exploration(Base_Task):
         1. End-effectors are above the table in reachable workspace
         2. Wrist cameras can see the table (EE pointing downward)
         3. Arms don't collide with each other
+        
+        If randomize_robot_init is False, just stays at home position.
         """
+        # Skip randomization if disabled - robot stays at home position
+        if not getattr(self, 'randomize_robot_init', True):
+            return
+        
         # Table surface height
         table_z = 0.74 + self.table_z_bias
         
@@ -398,99 +408,23 @@ class random_exploration(Base_Task):
         min_height_above_table = 0.10  # minimum 10cm above table
         max_height_above_table = 0.50  # maximum 50cm above table
         
-        max_attempts = 30
-        success = False
+        # Fallback to home position with very small perturbation
+        left_qpos = np.array(self.robot.left_homestate, dtype=np.float32)
+        right_qpos = np.array(self.robot.right_homestate, dtype=np.float32)
         
-        for attempt in range(max_attempts):
-            # Start from home position
-            left_qpos = np.array(self.robot.left_homestate, dtype=np.float32).copy()
-            right_qpos = np.array(self.robot.right_homestate, dtype=np.float32).copy()
-            
-            # Perturbation scale - start smaller, increase if failing
-            base_scale = 0.15 + 0.15 * (attempt / max_attempts)
-            
-            # Perturb joints with decreasing scale towards wrist
-            num_left = len(left_qpos)
-            num_right = len(right_qpos)
-            
-            # Joint-specific scales: more perturbation on base joints, less on wrist
-            def get_joint_scales(n):
-                if n >= 7:  # 7 DOF (franka)
-                    return np.array([1.0, 0.8, 0.8, 0.6, 0.5, 0.4, 0.3])
-                else:  # 6 DOF
-                    return np.array([1.0, 0.8, 0.8, 0.6, 0.4, 0.3])
-            
-            left_scales = get_joint_scales(num_left)[:num_left]
-            right_scales = get_joint_scales(num_right)[:num_right]
-            
-            left_perturb = np.random.uniform(-1, 1, num_left) * base_scale * left_scales
-            right_perturb = np.random.uniform(-1, 1, num_right) * base_scale * right_scales
-            
-            left_qpos += left_perturb
-            right_qpos += right_perturb
-            
-            # Clip to joint limits
-            limits = self.robot_info["arm_joint_limits"]
-            left_qpos = np.clip(left_qpos, limits["left_lower"], limits["left_upper"])
-            right_qpos = np.clip(right_qpos, limits["right_lower"], limits["right_upper"])
-            
-            # Apply joint positions
-            for i, joint in enumerate(self.robot.left_arm_joints):
-                joint.set_drive_target(float(left_qpos[i]))
-            for i, joint in enumerate(self.robot.right_arm_joints):
-                joint.set_drive_target(float(right_qpos[i]))
-            
-            # Step simulation to update poses
-            for _ in range(30):
-                self.scene.step()
-            self.scene.update_render()
-            
-            # Check end-effector positions
-            left_ee = self.get_arm_pose("left")
-            right_ee = self.get_arm_pose("right")
-            
-            # Validate height above table
-            left_height_ok = min_height_above_table <= (left_ee[2] - table_z) <= max_height_above_table
-            right_height_ok = min_height_above_table <= (right_ee[2] - table_z) <= max_height_above_table
-            
-            # Check EEs are within reasonable horizontal range (not too far from table center)
-            left_horiz_ok = abs(left_ee[0]) < 0.6 and abs(left_ee[1]) < 0.5
-            right_horiz_ok = abs(right_ee[0]) < 0.6 and abs(right_ee[1]) < 0.5
-            
-            # Check arms don't collide (minimum distance between EEs)
-            ee_distance = np.linalg.norm(np.array(left_ee[:3]) - np.array(right_ee[:3]))
-            arms_safe = ee_distance > 0.12
-            
-            # Check EE orientation - should be roughly pointing down for wrist camera to see table
-            left_z_down = self._check_ee_pointing_down("left")
-            right_z_down = self._check_ee_pointing_down("right")
-            
-            all_valid = (left_height_ok and right_height_ok and 
-                        left_horiz_ok and right_horiz_ok and 
-                        arms_safe and left_z_down and right_z_down)
-            
-            if all_valid:
-                success = True
-                break
+        # Very small safe perturbation on first few joints only
+        n_perturb = min(3, len(left_qpos))
+        left_qpos[:n_perturb] += np.random.uniform(-0.08, 0.08, n_perturb)
+        right_qpos[:n_perturb] += np.random.uniform(-0.08, 0.08, n_perturb)
         
-        if not success:
-            # Fallback to home position with very small perturbation
-            left_qpos = np.array(self.robot.left_homestate, dtype=np.float32)
-            right_qpos = np.array(self.robot.right_homestate, dtype=np.float32)
-            
-            # Very small safe perturbation on first few joints only
-            n_perturb = min(3, len(left_qpos))
-            left_qpos[:n_perturb] += np.random.uniform(-0.08, 0.08, n_perturb)
-            right_qpos[:n_perturb] += np.random.uniform(-0.08, 0.08, n_perturb)
-            
-            for i, joint in enumerate(self.robot.left_arm_joints):
-                joint.set_drive_target(float(left_qpos[i]))
-            for i, joint in enumerate(self.robot.right_arm_joints):
-                joint.set_drive_target(float(right_qpos[i]))
-            
-            for _ in range(30):
-                self.scene.step()
-            self.scene.update_render()
+        for i, joint in enumerate(self.robot.left_arm_joints):
+            joint.set_drive_target(float(left_qpos[i]))
+        for i, joint in enumerate(self.robot.right_arm_joints):
+            joint.set_drive_target(float(right_qpos[i]))
+        
+        for _ in range(30):
+            self.scene.step()
+        self.scene.update_render()
     
     def _check_ee_pointing_down(self, arm: str) -> bool:
         """

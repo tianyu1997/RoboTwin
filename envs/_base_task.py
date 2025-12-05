@@ -2,6 +2,8 @@ import os
 import re
 import logging
 import sapien.core as sapien
+import sapien.physx
+import sapien.render
 from sapien.render import clear_cache as sapien_clear_cache
 from sapien.utils.viewer import Viewer
 import numpy as np
@@ -14,7 +16,13 @@ from collections import OrderedDict
 import torch, random
 
 # Setup logger for base task
+# Check if this is the main process for distributed training
+# If RL_MAIN_PROCESS=0, this is a non-main process and should suppress logs
+_is_main_process = os.environ.get("RL_MAIN_PROCESS", "1") == "1"
 _logger = logging.getLogger(__name__)
+if not _is_main_process:
+    # Suppress logging for non-main processes in DDP training
+    _logger.setLevel(logging.WARNING)
 
 from .utils import *
 import math
@@ -73,13 +81,18 @@ class Base_Task(gym.Env):
         self.dual_arm = kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
 
-        self.need_topp = True  # TODO
+        # Motion planner: disable for RL training (not needed for delta action control)
+        # Setting need_topp=False and need_planner=False skips CuRobo initialization
+        self.need_topp = kwags.get("need_topp", True)
+        self.need_planner = kwags.get("need_planner", True)
 
         # Random
         random_setting = kwags.get("domain_randomization") or {}
         self.random_background = random_setting.get("random_background", False)
         self.cluttered_table = random_setting.get("cluttered_table", False)
-        self.clean_background_rate = random_setting.get("clean_background_rate", 1)
+        _logger.info(f"Domain randomization: cluttered_table={self.cluttered_table}, random_bg={self.random_background}")
+        # clean_background_rate: probability of NOT adding cluttered objects (0 = always add, 1 = never add)
+        self.clean_background_rate = random_setting.get("clean_background_rate", 0)
         self.random_head_camera_dis = random_setting.get("random_head_camera_dis", 0)
         self.random_table_height = random_setting.get("random_table_height", 0)
         self.random_light = random_setting.get("random_light", False)
@@ -217,14 +230,37 @@ class Base_Task(gym.Env):
         Set the scene
             - Set up the basic scene: light source, viewer.
         """
-        self.engine = sapien.Engine()
         # declare sapien renderer
         from sapien.render import set_global_config
 
         set_global_config(max_num_materials=50000, max_num_textures=50000)
-        self.renderer = sapien.SapienRenderer()
-        # give renderer to sapien sim
-        self.engine.set_renderer(self.renderer)
+        
+        # Use specific GPU for rendering if specified (for distributed training)
+        # This ensures each process uses its own GPU for SAPIEN rendering
+        render_device = kwargs.get("render_device", None)
+        
+        # Fallback: use environment variable if render_device not specified
+        if render_device is None:
+            env_device = os.environ.get("VK_DEVICE_INDEX", os.environ.get("SAPIEN_DEVICE_INDEX", None))
+            if env_device is not None:
+                render_device = int(env_device)
+        
+        # Use print instead of logger to ensure output even in non-main processes
+        import sys
+        print(f"[PID {os.getpid()}] SAPIEN render_device: {render_device} (from config or env)", file=sys.stderr, flush=True)
+        _logger.info(f"SAPIEN render_device from config: {render_device}")
+        
+        # SAPIEN 3.0 API: Create RenderSystem with specific device, then pass to Scene
+        # The old SapienRenderer API is deprecated and ignores device parameter
+        if render_device is not None:
+            device = sapien.Device(f"cuda:{render_device}")
+            print(f"[PID {os.getpid()}] Creating RenderSystem with device: cuda:{render_device}", file=sys.stderr, flush=True)
+            _logger.info(f"Creating RenderSystem with device: cuda:{render_device}")
+            render_system = sapien.render.RenderSystem(device)
+        else:
+            print(f"[PID {os.getpid()}] Creating RenderSystem with default device", file=sys.stderr, flush=True)
+            _logger.info("Creating RenderSystem with default device")
+            render_system = sapien.render.RenderSystem()
 
         # Render mode: "rt" for ray-tracing (high quality), "rasterize" for faster rendering
         render_mode = kwargs.get("render_mode", "rt")
@@ -240,9 +276,17 @@ class Base_Task(gym.Env):
             # Use rasterization shader (much faster, lower quality)
             sapien.render.set_camera_shader_dir("default")
 
-        # declare sapien scene
-        scene_config = sapien.SceneConfig()
-        self.scene = self.engine.create_scene(scene_config)
+        # SAPIEN 3.0 API: Create scene with both PhysX and Render systems
+        # Use PhysxCpuSystem for physics (stable, CPU is fast enough for RL)
+        # Use RenderSystem with specific GPU for rendering (this is the bottleneck)
+        # The key optimization is putting rendering on the correct GPU, not physics
+        physx_system = sapien.physx.PhysxCpuSystem()
+        self.scene = sapien.Scene(systems=[physx_system, render_system])
+        print(f"[PID {os.getpid()}] Created Scene with PhysxCpuSystem + RenderSystem(cuda:{render_device})", file=sys.stderr, flush=True)
+        
+        # Keep reference to engine for compatibility (deprecated but some code may use it)
+        self.engine = None  # Engine is deprecated in SAPIEN 3.0
+        self.renderer = None  # SapienRenderer is deprecated in SAPIEN 3.0
         # set simulation timestep
         self.scene.set_timestep(kwargs.get("timestep", 1 / 250))
         # add ground to scene
@@ -409,12 +453,17 @@ class Base_Task(gym.Env):
         """
         load aloha robot urdf file, set root pose and set joints
         """
+        # Remove need_topp from kwags to avoid passing it twice (as positional and keyword arg)
+        kwags_copy = {k: v for k, v in kwags.items() if k != 'need_topp'}
+        
         if not hasattr(self, "robot"):
-            self.robot = Robot(self.scene, self.need_topp, **kwags)
-            self.robot.set_planner(self.scene)
+            self.robot = Robot(self.scene, self.need_topp, **kwags_copy)
+            # Only initialize planner if needed (skip for RL training to save time/memory)
+            if getattr(self, 'need_planner', True):
+                self.robot.set_planner(self.scene)
             self.robot.init_joints()
         else:
-            self.robot.reset(self.scene, self.need_topp, **kwags)
+            self.robot.reset(self.scene, self.need_topp, **kwags_copy)
 
         for link in self.robot.left_entity.get_links():
             link: sapien.physx.PhysxArticulationLinkComponent = link

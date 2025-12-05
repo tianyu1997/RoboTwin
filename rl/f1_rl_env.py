@@ -267,6 +267,7 @@ class F1RLEnv(gym.Env):
         action_bounds: Optional[Dict[str, Tuple[float, float]]] = None,  # Custom action bounds override
         single_arm: bool = False,  # Single arm mode: only use left arm
         scene_reset_interval: int = 1,  # Regenerate scene every N episodes
+        randomize_robot_init: bool = True,  # Randomize robot initial position
     ):
         """
         Initialize F1 RL Environment.
@@ -289,7 +290,25 @@ class F1RLEnv(gym.Env):
                 - delta_ee: {'position': (low, high), 'rotation': (low, high), 'gripper': (low, high)}
             single_arm: If True, only use left arm, right arm actions are zeroed
             scene_reset_interval: Regenerate scene every N episodes (1 = every episode, higher = faster)
+            randomize_robot_init: If True, randomize robot initial position. Set False to use fixed home position.
         """
+        super().__init__()
+        
+        self.phase = phase
+        self.history_length = history_length
+        self.max_steps = max_steps
+        self.device = device
+        self.teacher_policy = teacher_policy
+        self.image_size = image_size
+        self.action_dim = action_dim
+        self.state_dim = state_dim
+        self.render_mode_str = render_mode
+        self.max_reset_retries = max_reset_retries
+        self.action_scale = np.clip(action_scale, 0.01, 1.0)  # Clamp to valid range
+        self.custom_action_bounds = action_bounds
+        self.single_arm = single_arm
+        self.scene_reset_interval = max(1, scene_reset_interval)  # At least 1
+        self.randomize_robot_init = randomize_robot_init  # Whether to randomize robot initial position
         super().__init__()
         
         self.phase = phase
@@ -594,15 +613,24 @@ class F1RLEnv(gym.Env):
         
         if need_initial_setup:
             config = self.task_config.copy()
+            # Debug: log render_device propagation
+            self.logger.info(f"F1RLEnv.reset: task_config render_device = {self.task_config.get('render_device', 'NOT SET')}")
+            self.logger.info(f"F1RLEnv.reset: config (after copy) render_device = {config.get('render_device', 'NOT SET')}")
+            
             config["seed"] = current_seed
             config["render_mode"] = self.render_mode_str
             # Disable viewer for headless training (no display)
             config["render_freq"] = 0
+            # Pass randomize_robot_init setting to task
+            config["randomize_robot_init"] = self.randomize_robot_init
             
             # Load embodiment configurations (required for robot setup)
             # rl/f1_rl_env.py -> RoboTwin
             robotwin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             config = load_embodiment_config(config, base_dir=robotwin_dir)
+            
+            # Debug: log render_device after embodiment config loading
+            self.logger.info(f"F1RLEnv.reset: config (after load_embodiment_config) render_device = {config.get('render_device', 'NOT SET')}")
             
             # First reset: load robot
             if self.episode_count == 0:
@@ -876,13 +904,13 @@ class F1RLEnv(gym.Env):
         action: np.ndarray,
     ) -> Tuple[float, Dict[str, Any]]:
         """
-        Compute reward for student phase.
-        
-        Reward = |h_student_t - h_teacher_t| - |h_student_t+1 - h_teacher_t+1|
-        
-        This reward is positive when student's memory state moves closer to teacher's memory state.
-        The student is encouraged to take actions that reduce the divergence between its 
-        memory state and the teacher's memory state over time.
+            Compute reward for student phase.
+            
+            Reward = |h_student_t - h_teacher_t| - |h_student_t+1 - h_teacher_t+1|
+            
+            This reward is positive when student's memory state moves closer to teacher's memory state.
+            The student is encouraged to take actions that reduce the divergence between its 
+            memory state and the teacher's memory state over time.
         """
         if self.teacher_policy is None:
             return 0.0, {"reward_type": "dummy"}
@@ -1113,6 +1141,11 @@ class TeacherEnv(F1RLEnv):
     """Convenience class for teacher phase training."""
     
     def __init__(self, task_config: Dict[str, Any], **kwargs):
+        # Debug: log render_device at TeacherEnv creation
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"TeacherEnv.__init__: task_config render_device = {task_config.get('render_device', 'NOT SET')}")
+        logger.info(f"TeacherEnv.__init__: task_config keys = {list(task_config.keys())}")
         kwargs.pop("phase", None)
         super().__init__(task_config, phase="teacher", **kwargs)
 

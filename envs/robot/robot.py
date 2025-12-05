@@ -124,16 +124,18 @@ class Robot:
     def reset(self, scene, need_topp=False, **kwargs):
         self._init_robot_(scene, need_topp, **kwargs)
 
-        if self.communication_flag:
-            if hasattr(self, "left_conn") and self.left_conn:
-                self.left_conn.send({"cmd": "reset"})
-                _ = self.left_conn.recv()
-            if hasattr(self, "right_conn") and self.right_conn:
-                self.right_conn.send({"cmd": "reset"})
-                _ = self.right_conn.recv()
-        else:
-            if not isinstance(self.left_planner, CuroboPlanner) or not isinstance(self.right_planner, CuroboPlanner):
-                self.set_planner(scene=scene)
+        # Only reset planner if it was previously initialized
+        if hasattr(self, 'communication_flag') and hasattr(self, 'left_planner'):
+            if self.communication_flag:
+                if hasattr(self, "left_conn") and self.left_conn:
+                    self.left_conn.send({"cmd": "reset"})
+                    _ = self.left_conn.recv()
+                if hasattr(self, "right_conn") and self.right_conn:
+                    self.right_conn.send({"cmd": "reset"})
+                    _ = self.right_conn.recv()
+            else:
+                if not isinstance(self.left_planner, CuroboPlanner) or not isinstance(self.right_planner, CuroboPlanner):
+                    self.set_planner(scene=scene)
 
         self.init_joints()
 
@@ -342,7 +344,22 @@ class Robot:
         gripper_pose_quat = t3d.quaternions.mat2quat(gripper_pose_mat)
         return sapien.Pose(gripper_pose_pos, gripper_pose_quat)
 
+    def _simple_plan_grippers(self, now_val, target_val):
+        """Simple linear interpolation for gripper planning (no CuRobo needed)."""
+        num_step = 200
+        dis_val = target_val - now_val
+        per_step = dis_val / num_step
+        vals = np.linspace(now_val, target_val, num_step)
+        return {
+            "num_step": num_step,
+            "per_step": per_step,
+            "result": vals,
+        }
+
     def left_plan_grippers(self, now_val, target_val):
+        # If planner is not initialized, use simple linear interpolation
+        if not hasattr(self, 'left_planner'):
+            return self._simple_plan_grippers(now_val, target_val)
         if self.communication_flag:
             self.left_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.left_conn.recv()
@@ -350,6 +367,9 @@ class Robot:
             return self.left_planner.plan_grippers(now_val, target_val)
 
     def right_plan_grippers(self, now_val, target_val):
+        # If planner is not initialized, use simple linear interpolation
+        if not hasattr(self, 'right_planner'):
+            return self._simple_plan_grippers(now_val, target_val)
         if self.communication_flag:
             self.right_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.right_conn.recv()

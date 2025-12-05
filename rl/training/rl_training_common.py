@@ -39,12 +39,14 @@ logger = logging.getLogger(__name__)
 # Logging Configuration
 # =============================================================================
 
-def setup_logging_from_config(config: DictConfig) -> None:
+def setup_logging_from_config(config: DictConfig, is_main_process: bool = True) -> None:
     """
     Setup logging based on config file settings.
     
     Args:
         config: Full RL config with logging section
+        is_main_process: Whether this is the main process (for DDP).
+                        Non-main processes only log WARNING+ to reduce noise.
     """
     log_cfg = config.get("logging", {})
     console_level = log_cfg.get("console_level", "WARNING").upper()
@@ -60,7 +62,12 @@ def setup_logging_from_config(config: DictConfig) -> None:
         "CRITICAL": logging.CRITICAL,
     }
     
-    console_lvl = level_map.get(console_level, logging.WARNING)
+    # For non-main processes in DDP, only show warnings and above
+    if not is_main_process:
+        console_lvl = logging.WARNING
+        enable_file = False  # Only main process writes to file
+    else:
+        console_lvl = level_map.get(console_level, logging.WARNING)
     file_lvl = level_map.get(file_level, logging.DEBUG)
     
     # Configure root logger
@@ -71,17 +78,19 @@ def setup_logging_from_config(config: DictConfig) -> None:
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
-    # Console handler
+    # Console handler with process rank prefix for non-main processes
     console_handler = logging.StreamHandler()
     console_handler.setLevel(console_lvl)
-    console_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%H:%M:%S'
-    ))
+    if is_main_process:
+        fmt = '%(asctime)s [%(levelname)s] %(message)s'
+    else:
+        rank = os.environ.get('LOCAL_RANK', os.environ.get('RANK', '?'))
+        fmt = f'%(asctime)s [RANK {rank}] [%(levelname)s] %(message)s'
+    console_handler.setFormatter(logging.Formatter(fmt, datefmt='%H:%M:%S'))
     root_logger.addHandler(console_handler)
     
-    # File handler (optional)
-    if enable_file:
+    # File handler (optional, only on main process)
+    if enable_file and is_main_process:
         os.makedirs("logs", exist_ok=True)
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -98,7 +107,8 @@ def setup_logging_from_config(config: DictConfig) -> None:
         logging.getLogger(lib_name).setLevel(logging.WARNING)
     
     # Use DEBUG level for this message since we're in setup
-    logger.debug(f"Logging configured: console={console_level}, file={file_level}")
+    if is_main_process:
+        logger.debug(f"Logging configured: console={console_level}, file={file_level}")
 
 
 # =============================================================================
@@ -315,6 +325,30 @@ def get_environment_config(config: DictConfig, num_steps: Optional[int] = None) 
     env_cfg = config.get("environment", {})
     train_cfg = config.get("training", {})
     
+    # Convert OmegaConf DictConfig to regular Python dict if needed
+    def to_dict(obj):
+        if hasattr(obj, '_iter_ex_keys'):  # OmegaConf DictConfig
+            return {k: to_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [to_dict(v) for v in obj]
+        else:
+            return obj
+    
+    # Get domain_randomization - ensure it's converted to regular dict
+    domain_rand_cfg = env_cfg.get("domain_randomization", None)
+    if domain_rand_cfg is not None:
+        domain_randomization = to_dict(domain_rand_cfg)
+    else:
+        domain_randomization = {
+            "random_appearance": False,
+            "random_background": True,
+            "random_light": True,
+            "cluttered_table": False,
+        }
+    
+    # Log for debugging
+    logger.info(f"Loading domain_randomization from config: {domain_randomization}")
+    
     env_config = {
         "task_name": env_cfg.get("task_name", "random_exploration"),
         "control_mode": env_cfg.get("control_mode", "delta_qpos"),
@@ -326,24 +360,19 @@ def get_environment_config(config: DictConfig, num_steps: Optional[int] = None) 
         # Single arm mode and scene reset interval
         "single_arm": env_cfg.get("single_arm", False),
         "scene_reset_interval": env_cfg.get("scene_reset_interval", 1),
-        "camera": env_cfg.get("camera", {
+        "camera": to_dict(env_cfg.get("camera", {
             "head_camera_type": "D435",
             "wrist_camera_type": "D435",
             "collect_head_camera": True,
             "collect_wrist_camera": True,
-        }),
-        "domain_randomization": env_cfg.get("domain_randomization", {
-            "random_appearance": False,
-            "random_background": True,
-            "random_light": True,
-            "cluttered_table": False,
-        }),
-        "data_type": env_cfg.get("data_type", {
+        })),
+        "domain_randomization": domain_randomization,
+        "data_type": to_dict(env_cfg.get("data_type", {
             "collect_rgb": True,
             "collect_depth": False,
             "collect_qpos": True,
             "collect_endpose": True,
-        }),
+        })),
     }
     
     return env_config
@@ -359,6 +388,7 @@ def load_f1_policy(
     debug: bool = False,
     lora_config: Optional[LoRAConfig] = None,
     checkpoint_path: Optional[str] = None,
+    is_main_process: bool = True,
 ):
     """
     Load F1-VLA policy with optional LoRA and checkpoint.
@@ -369,20 +399,47 @@ def load_f1_policy(
         debug: If True, create model from scratch
         lora_config: LoRA configuration (None to skip LoRA)
         checkpoint_path: Path to additional checkpoint to load
+        is_main_process: If True, print progress messages (set False for non-main DDP ranks)
         
     Returns:
         Tuple of (policy, policy_config, full_config)
     """
+    import sys
+    import io
+    
+    # Helper to print only on main process
+    def _print(msg):
+        if is_main_process:
+            print(msg)
+    
+    # Context manager to suppress stdout on non-main processes
+    # This catches all prints from F1_VLA and other internal code
+    class SuppressStdout:
+        def __enter__(self):
+            if not is_main_process:
+                self._stdout = sys.stdout
+                sys.stdout = io.StringIO()
+            return self
+        def __exit__(self, *args):
+            if not is_main_process:
+                sys.stdout = self._stdout
+    
+    # Ensure current CUDA device is set BEFORE loading model
+    # This prevents from_pretrained from loading to default GPU (cuda:0)
+    if device.startswith("cuda"):
+        import torch
+        torch.cuda.set_device(device)
+    
     from f1_vla.src.models.configuration_f1 import F1Config
     from f1_vla.src.policies.f1_policy import F1_VLA
     from f1_vla.src.utils.utils import load_ckpt, set_policy_config, unfreeze_memory_params
     
     # Load config from YAML
-    print("  Loading config file...")
+    _print("  Loading config file...")
     config = OmegaConf.load(Path(config_file))
     
     # Load F1Config and set policy config
-    print(f"  Loading F1Config from: {config.policy.ckpt_path}")
+    _print(f"  Loading F1Config from: {config.policy.ckpt_path}")
     policy_config = F1Config.from_pretrained(config.policy.ckpt_path)
     policy_config = set_policy_config(policy_config, config.policy)
     
@@ -390,53 +447,54 @@ def load_f1_policy(
     logger.debug(f"Pretrained path: {policy_config.pretrained_path}")
     logger.debug(f"Use world model: {policy_config.use_world_model}")
     
-    # Create model
+    # Create model (suppress verbose output on non-main processes)
     kwargs = {
         "config": policy_config,
         "pretrained_name_or_path": policy_config.pretrained_path,
     }
     
-    if policy_config.pretrained_path and not debug:
-        print(f"  Loading pretrained model from: {policy_config.pretrained_path}")
-        policy = F1_VLA.from_pretrained(**kwargs)
-        print("  Loading additional checkpoint...")
-        # Load additional checkpoint (e.g., world model weights)
-        policy = load_ckpt(policy, config)
-        print("  Pretrained weights loaded successfully")
-    else:
-        print("  Creating model from scratch (debug mode)")
-        policy = F1_VLA(**kwargs)
-    
-    # Load additional checkpoint if specified
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        print(f"  Loading checkpoint from: {checkpoint_path}")
-        load_config = OmegaConf.create({"exp": {"load_ckpt": checkpoint_path}})
-        policy = load_ckpt(policy, load_config)
-    
-    # Apply LoRA if configured
-    if lora_config is not None:
-        print("  Applying LoRA configuration...")
-        from peft import get_peft_model, LoraConfig as PeftLoraConfig
+    with SuppressStdout():
+        if policy_config.pretrained_path and not debug:
+            _print(f"  Loading pretrained model from: {policy_config.pretrained_path}")
+            policy = F1_VLA.from_pretrained(**kwargs)
+            _print("  Loading additional checkpoint...")
+            # Load additional checkpoint (e.g., world model weights)
+            policy = load_ckpt(policy, config)
+            _print("  Pretrained weights loaded successfully")
+        else:
+            _print("  Creating model from scratch (debug mode)")
+            policy = F1_VLA(**kwargs)
         
-        peft_config = PeftLoraConfig(
-            r=lora_config.r,
-            lora_alpha=lora_config.lora_alpha,
-            target_modules=lora_config.target_modules,
-            lora_dropout=lora_config.lora_dropout,
-            bias=lora_config.bias,
-            task_type=lora_config.task_type,
-        )
-        policy = get_peft_model(policy, peft_config)
-        logger.debug("Applied LoRA configuration")
-    
-    # Unfreeze memory-related parameters
-    unfrozen = unfreeze_memory_params(policy)
-    print(f"  Unfrozen {len(unfrozen)} memory parameters")
+        # Load additional checkpoint if specified
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            _print(f"  Loading checkpoint from: {checkpoint_path}")
+            load_config = OmegaConf.create({"exp": {"load_ckpt": checkpoint_path}})
+            policy = load_ckpt(policy, load_config)
+        
+        # Apply LoRA if configured
+        if lora_config is not None:
+            _print("  Applying LoRA configuration...")
+            from peft import get_peft_model, LoraConfig as PeftLoraConfig
+            
+            peft_config = PeftLoraConfig(
+                r=lora_config.r,
+                lora_alpha=lora_config.lora_alpha,
+                target_modules=lora_config.target_modules,
+                lora_dropout=lora_config.lora_dropout,
+                bias=lora_config.bias,
+                task_type=lora_config.task_type,
+            )
+            policy = get_peft_model(policy, peft_config)
+            logger.debug("Applied LoRA configuration")
+        
+        # Unfreeze memory-related parameters
+        unfrozen = unfreeze_memory_params(policy)
+        _print(f"  Unfrozen {len(unfrozen)} memory parameters")
     
     # Move to device
-    print(f"  Moving model to {device}...")
+    _print(f"  Moving model to {device}...")
     policy = policy.to(device)
-    print("  Model ready!")
+    _print("  Model ready!")
     
     return policy, policy_config, config
 

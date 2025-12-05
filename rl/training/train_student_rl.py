@@ -61,6 +61,15 @@ from rl.training.rl_training_common import (
     set_policy_requires_grad,
 )
 
+# Import parallel training utilities
+from rl.training.parallel_utils import (
+    AcceleratorWrapper,
+    create_accelerator,
+    SequentialEpisodeBuffer,
+    ParallelEnvCollector,
+    print_rank0,
+)
+
 # Default logging (will be overridden by config)
 logging.basicConfig(
     level=logging.WARNING,
@@ -110,6 +119,12 @@ def parse_args():
     parser.add_argument("--resume", type=str, default=None,
                        help="Path to checkpoint directory to resume training from")
     
+    # DDP and multi-environment options
+    parser.add_argument("--num_envs", type=int, default=1,
+                       help="Number of parallel environments for data collection")
+    parser.add_argument("--use_ddp", action="store_true",
+                       help="Use distributed data parallel training")
+    
     return parser.parse_args()
 
 
@@ -120,6 +135,9 @@ class StudentTrainer(BaseRLTrainer):
     Uses PPO-style policy gradient with custom rewards:
     1. Memory divergence: change in teacher's memory state
     2. WM uncertainty: prediction error (actions that surprise WM)
+    
+    Supports DDP via HuggingFace Accelerate and multi-environment collection
+    via gymnasium's SyncVectorEnv.
     """
     
     def __init__(
@@ -130,7 +148,13 @@ class StudentTrainer(BaseRLTrainer):
         rl_config: OmegaConf,
         model_config_file: str,
         device: str = "cuda",
+        accelerator: Optional[AcceleratorWrapper] = None,
+        num_envs: int = 1,
     ):
+        # Store accelerator for DDP support
+        self.accelerator = accelerator
+        self.num_envs = num_envs
+        
         # Load model config to get n_obs_img_steps and stride
         import yaml
         with open(model_config_file, 'r') as f:
@@ -207,7 +231,7 @@ class StudentTrainer(BaseRLTrainer):
         
         # Setup optimizer and scheduler
         trainable, total = count_trainable_params(self.student_policy)
-        logger.info(f"Student trainable parameters: {trainable:,} / {total:,}")
+        self._print(f"Student trainable parameters: {trainable:,} / {total:,}")
         
         self.optimizer = setup_optimizer(
             self.student_policy,
@@ -220,6 +244,16 @@ class StudentTrainer(BaseRLTrainer):
             T_max=train_config.num_episodes,
             eta_min=1e-6,
         )
+        
+        # Prepare model and optimizer for DDP if accelerator is provided
+        if self.accelerator is not None:
+            self.student_policy, self.optimizer, self.scheduler = self.accelerator.prepare(
+                self.student_policy, self.optimizer, self.scheduler
+            )
+            self._print(f"DDP setup complete: {self.accelerator.num_processes} processes")
+            
+        # Setup parallel environment collector if num_envs > 1
+        self.env_collector = None  # Will be set in setup_environment
         
         # Environment config
         self.env_config = get_environment_config(rl_config)
@@ -258,19 +292,44 @@ class StudentTrainer(BaseRLTrainer):
             "episode_reward": deque(maxlen=100),
         })
     
+    def _print(self, msg: str):
+        """Print only on main process."""
+        if self._is_main_process():
+            logger.info(msg)
+    
+    def _is_main_process(self) -> bool:
+        """Check if this is the main process."""
+        if self.accelerator is None:
+            return True
+        return self.accelerator.is_main_process
+    
     def setup_environment(self):
-        """Setup the RL environment."""
+        """Setup the RL environment with optional multi-env support."""
         from rl.f1_rl_env import StudentEnv
         
-        self.env = StudentEnv(
-            task_config=self.env_config,
-            teacher_policy=self.teacher_policy,
-            history_length=self.config.history_length,
-            max_steps=self.config.steps_per_episode,
-            device=self.device,
-            action_scale=self.config.action_scale,
-        )
-        logger.info(f"Student environment setup complete")
+        def make_env():
+            return StudentEnv(
+                task_config=self.env_config,
+                teacher_policy=self.teacher_policy,
+                history_length=self.config.history_length,
+                max_steps=self.config.steps_per_episode,
+                device=self.device,
+                action_scale=self.config.action_scale,
+            )
+        
+        # Single env for compatibility
+        self.env = make_env()
+        
+        # Multi-env collector
+        if self.num_envs > 1:
+            self.env_collector = ParallelEnvCollector(
+                env_fn=make_env,
+                num_envs=self.num_envs,
+            )
+            self.env_collector.initialize()
+            self._print(f"Parallel env collector setup: {self.num_envs} envs")
+        
+        self._print(f"Student environment setup complete")
     
     def collect_episode(self) -> List[Dict[str, Any]]:
         """Collect one episode using student policy."""
@@ -699,12 +758,22 @@ def main():
     if args.debug is not None:
         rl_config.debug = args.debug
     
-    device = rl_config.get("device", "cuda")
-    debug = rl_config.get("debug", False)
+    # Create accelerator for DDP if requested
+    accelerator = None
+    if args.use_ddp:
+        accelerator = create_accelerator(mixed_precision="no")
+        device = str(accelerator.device)
+        accelerator.print("=" * 70)
+        accelerator.print("Student Policy Training (Phase 2) - DDP Mode")
+        accelerator.print(f"Number of processes: {accelerator.num_processes}")
+        accelerator.print("=" * 70)
+    else:
+        device = rl_config.get("device", "cuda")
+        logger.info("=" * 70)
+        logger.info("Student Policy Training (Phase 2)")
+        logger.info("=" * 70)
     
-    logger.info("=" * 70)
-    logger.info("Student Policy Training (Phase 2)")
-    logger.info("=" * 70)
+    debug = rl_config.get("debug", False)
     
     # Load model config file path
     model_config_file = rl_config.get("model", {}).get(
@@ -716,7 +785,8 @@ def main():
     lora_config = get_lora_config_from_dict(rl_config)
     
     # Load teacher policy (frozen)
-    logger.info(f"Loading teacher policy from: {args.teacher_path}")
+    if accelerator is None or accelerator.is_main_process:
+        logger.info(f"Loading teacher policy from: {args.teacher_path}")
     teacher_policy, _, _ = load_f1_policy(
         config_file=model_config_file,
         device=device,
@@ -733,9 +803,14 @@ def main():
         lora_config=lora_config,
     )
     
-    logger.info("Models loaded successfully")
+    if accelerator is None or accelerator.is_main_process:
+        logger.info("Models loaded successfully")
     
-    # Create trainer
+    # Sync before creating trainer
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    
+    # Create trainer with accelerator and num_envs
     trainer = StudentTrainer(
         student_policy=student_policy,
         teacher_policy=teacher_policy,
@@ -743,6 +818,8 @@ def main():
         rl_config=rl_config,
         model_config_file=model_config_file,
         device=device,
+        accelerator=accelerator,
+        num_envs=args.num_envs,
     )
     
     # Resume training if specified
