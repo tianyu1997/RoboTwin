@@ -13,8 +13,28 @@ Phase 2 Training:
   2. Actions that make World Model unable to accurately predict next frame
 """
 
+# ============== MUST BE FIRST: Set GPU device for SAPIEN Vulkan rendering ==============
 import os
 import sys
+
+# Get LOCAL_RANK from environment (set by accelerate/torchrun)
+local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+# Get the physical GPU ID from CUDA_VISIBLE_DEVICES mapping
+cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+if cuda_visible:
+    visible_gpus = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
+    if local_rank < len(visible_gpus):
+        physical_gpu_id = visible_gpus[local_rank]
+    else:
+        physical_gpu_id = local_rank
+else:
+    physical_gpu_id = local_rank
+
+# Set environment variables for SAPIEN/Vulkan BEFORE any imports
+os.environ["VK_DEVICE_INDEX"] = str(physical_gpu_id)
+os.environ["SAPIEN_DEVICE_INDEX"] = str(physical_gpu_id)
+os.environ["EGL_DEVICE_ID"] = str(physical_gpu_id)
 
 # ============== Setup paths BEFORE importing other modules ==============
 script_dir = os.path.dirname(os.path.abspath(__file__))  # rl/training
@@ -307,9 +327,26 @@ class StudentTrainer(BaseRLTrainer):
         """Setup the RL environment with optional multi-env support."""
         from rl.f1_rl_env import StudentEnv
         
+        # Get GPU ID for this process
+        local_gpu_id = 0
+        if self.accelerator is not None:
+            local_process_idx = self.accelerator.local_process_index
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+            if cuda_visible:
+                visible_gpus = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
+                if local_process_idx < len(visible_gpus):
+                    local_gpu_id = visible_gpus[local_process_idx]
+                else:
+                    local_gpu_id = local_process_idx
+            else:
+                local_gpu_id = local_process_idx
+        
         def make_env():
             return StudentEnv(
-                task_config=self.env_config,
+                task_config={
+                    **self.env_config,
+                    "render_device": local_gpu_id,
+                },
                 teacher_policy=self.teacher_policy,
                 history_length=self.config.history_length,
                 max_steps=self.config.steps_per_episode,

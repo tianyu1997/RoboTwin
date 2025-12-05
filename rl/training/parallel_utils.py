@@ -378,7 +378,7 @@ class ParallelEnvCollector:
             return
         
         if self.is_main_process:
-            logger.info(f"Initializing {self.num_envs} parallel environments (SyncVectorEnv)...")
+            logger.debug(f"Initializing {self.num_envs} parallel environments (SyncVectorEnv)...")
         
         # Suppress verbose environment output on non-main processes
         old_stdout = sys.stdout
@@ -401,7 +401,7 @@ class ParallelEnvCollector:
         
         self._initialized = True
         if self.is_main_process:
-            logger.info(f"Initialized {self.num_envs} parallel environments")
+            logger.debug(f"Initialized {self.num_envs} parallel environments")
     
     def collect_steps(
         self,

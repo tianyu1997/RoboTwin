@@ -43,11 +43,6 @@ os.environ["VK_DEVICE_INDEX"] = str(physical_gpu_id)
 os.environ["SAPIEN_DEVICE_INDEX"] = str(physical_gpu_id)
 os.environ["EGL_DEVICE_ID"] = str(physical_gpu_id)
 
-# Debug output (to stderr so it appears even with log suppression)
-print(f"[PID {os.getpid()}] LOCAL_RANK={local_rank}, CUDA_VISIBLE_DEVICES={cuda_visible}, "
-      f"physical_gpu_id={physical_gpu_id}, VK_DEVICE_INDEX={os.environ.get('VK_DEVICE_INDEX')}", 
-      file=sys.stderr, flush=True)
-
 # ============== Now continue with other imports and setup ==============
 import warnings
 
@@ -366,13 +361,11 @@ class WorldModelTrainer:
                 else:
                     # Fallback: use local_process_index directly
                     local_gpu_id = local_process_idx
-                logger.info(f"Process {self.accelerator.process_index}: CUDA_VISIBLE_DEVICES={cuda_visible}, "
-                           f"local_process_idx={local_process_idx}, physical_gpu_id={local_gpu_id}")
+                logger.debug(f"Process {self.accelerator.process_index}: GPU={local_gpu_id}")
             else:
                 # No CUDA_VISIBLE_DEVICES set, use local_process_index directly
                 local_gpu_id = local_process_idx
-                logger.info(f"Process {self.accelerator.process_index}: No CUDA_VISIBLE_DEVICES, "
-                           f"using local_process_idx={local_process_idx} as GPU ID")
+                logger.debug(f"Process {self.accelerator.process_index}: using GPU={local_process_idx}")
             
             # Set RL_MAIN_PROCESS to control logging in _base_task.py
             # Non-main processes will suppress INFO logs
@@ -399,15 +392,12 @@ class WorldModelTrainer:
         
         # Log domain_randomization config for debugging
         domain_rand = self.env_config.get("domain_randomization", {})
-        logger.info(f"Environment config domain_randomization: {domain_rand}")
-        
-        # Debug: log GPU assignment for this process
-        logger.info(f"create_env: local_gpu_id = {local_gpu_id} (will be passed as render_device)")
+        logger.debug(f"Environment config domain_randomization: {domain_rand}")
         
         def create_env():
             # Capture local_gpu_id in closure
             gpu_id = local_gpu_id
-            logger.info(f"create_env closure: captured gpu_id = {gpu_id}")
+            logger.debug(f"create_env: gpu_id = {gpu_id}")
             return TeacherEnv(
                 task_config={
                     **self.env_config,
@@ -600,7 +590,7 @@ class WorldModelTrainer:
                     continue
                 
                 batch = self.batch_builder.build_batch(
-                    batch_transitions, include_memory_states=False
+                    batch_transitions, include_memory_states=True
                 )
                 
                 result = self.train_step(batch)

@@ -110,7 +110,7 @@ training:
   
   # Logging & checkpointing
   log_every: 1
-  save_every: 1000
+  save_every: 200
   
   # Memory/Sequential processing
   # F1-VLA has memory_rnn that needs sequential state propagation

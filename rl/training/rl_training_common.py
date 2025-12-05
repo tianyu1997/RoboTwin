@@ -36,6 +36,57 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# GPU Assignment for SAPIEN Rendering
+# =============================================================================
+
+def get_physical_gpu_id(accelerator=None) -> int:
+    """
+    Get the physical GPU ID for this process.
+    
+    Maps LOCAL_RANK to actual GPU ID when using CUDA_VISIBLE_DEVICES.
+    This is needed because SAPIEN/Vulkan uses physical GPU indices,
+    not the remapped indices from CUDA_VISIBLE_DEVICES.
+    
+    Args:
+        accelerator: Optional AcceleratorWrapper for DDP training
+        
+    Returns:
+        Physical GPU ID for SAPIEN rendering
+    """
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    
+    if accelerator is not None:
+        local_rank = accelerator.local_process_index
+    
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if cuda_visible:
+        visible_gpus = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
+        if local_rank < len(visible_gpus):
+            return visible_gpus[local_rank]
+    
+    return local_rank
+
+
+def setup_sapien_gpu(gpu_id: Optional[int] = None):
+    """
+    Set environment variables for SAPIEN/Vulkan GPU selection.
+    
+    Must be called BEFORE importing SAPIEN or any module that imports it.
+    
+    Args:
+        gpu_id: Physical GPU ID. If None, auto-detect from LOCAL_RANK.
+    """
+    if gpu_id is None:
+        gpu_id = get_physical_gpu_id()
+    
+    os.environ["VK_DEVICE_INDEX"] = str(gpu_id)
+    os.environ["SAPIEN_DEVICE_INDEX"] = str(gpu_id)
+    os.environ["EGL_DEVICE_ID"] = str(gpu_id)
+    
+    logger.debug(f"SAPIEN GPU set to: {gpu_id}")
+
+
+# =============================================================================
 # Logging Configuration
 # =============================================================================
 

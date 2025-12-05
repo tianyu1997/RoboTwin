@@ -13,8 +13,28 @@ The training alternates between:
 2. Explorer update: Maximize WM's prediction error (find novel actions)
 """
 
+# ============== MUST BE FIRST: Set GPU device for SAPIEN Vulkan rendering ==============
 import os
 import sys
+
+# Get LOCAL_RANK from environment (set by accelerate/torchrun)
+local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+# Get the physical GPU ID from CUDA_VISIBLE_DEVICES mapping
+cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+if cuda_visible:
+    visible_gpus = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
+    if local_rank < len(visible_gpus):
+        physical_gpu_id = visible_gpus[local_rank]
+    else:
+        physical_gpu_id = local_rank
+else:
+    physical_gpu_id = local_rank
+
+# Set environment variables for SAPIEN/Vulkan BEFORE any imports
+os.environ["VK_DEVICE_INDEX"] = str(physical_gpu_id)
+os.environ["SAPIEN_DEVICE_INDEX"] = str(physical_gpu_id)
+os.environ["EGL_DEVICE_ID"] = str(physical_gpu_id)
 
 # ============== Setup paths BEFORE importing other modules ==============
 script_dir = os.path.dirname(os.path.abspath(__file__))  # rl/training
@@ -889,9 +909,26 @@ def main():
     env_config = get_environment_config(rl_config)
     train_config = get_training_config(rl_config)
     
+    # Get GPU ID for render_device
+    local_gpu_id = 0
+    if accelerator is not None:
+        local_process_idx = accelerator.local_process_index
+        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        if cuda_visible:
+            visible_gpus = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
+            if local_process_idx < len(visible_gpus):
+                local_gpu_id = visible_gpus[local_process_idx]
+            else:
+                local_gpu_id = local_process_idx
+        else:
+            local_gpu_id = local_process_idx
+    
     def make_env():
         return F1RLEnv(
-            task_config=env_config,
+            task_config={
+                **env_config,
+                "render_device": local_gpu_id,
+            },
             phase="student",
             teacher_policy=teacher_policy,
             device=device,

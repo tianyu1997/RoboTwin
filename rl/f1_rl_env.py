@@ -614,8 +614,7 @@ class F1RLEnv(gym.Env):
         if need_initial_setup:
             config = self.task_config.copy()
             # Debug: log render_device propagation
-            self.logger.info(f"F1RLEnv.reset: task_config render_device = {self.task_config.get('render_device', 'NOT SET')}")
-            self.logger.info(f"F1RLEnv.reset: config (after copy) render_device = {config.get('render_device', 'NOT SET')}")
+            self.logger.debug(f"F1RLEnv.reset: render_device = {self.task_config.get('render_device', 'NOT SET')}")
             
             config["seed"] = current_seed
             config["render_mode"] = self.render_mode_str
@@ -629,12 +628,9 @@ class F1RLEnv(gym.Env):
             robotwin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             config = load_embodiment_config(config, base_dir=robotwin_dir)
             
-            # Debug: log render_device after embodiment config loading
-            self.logger.info(f"F1RLEnv.reset: config (after load_embodiment_config) render_device = {config.get('render_device', 'NOT SET')}")
-            
             # First reset: load robot
             if self.episode_count == 0:
-                self.logger.info("Loading robot (first reset)...")
+                self.logger.debug("Loading robot (first reset)...")
             
             # Save config for later use in reset_for_new_episode
             self._saved_config = config
@@ -750,7 +746,7 @@ class F1RLEnv(gym.Env):
         
         # Only log episode reset at INFO level for every 100th episode
         if self.episode_count % 100 == 1:
-            self.logger.info(
+            self.logger.debug(
                 f"Episode {self.episode_count}: phase={self.phase}, "
                 f"embodiment={info['embodiment']}, control_mode={info['control_mode']}"
             )
@@ -1144,8 +1140,7 @@ class TeacherEnv(F1RLEnv):
         # Debug: log render_device at TeacherEnv creation
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"TeacherEnv.__init__: task_config render_device = {task_config.get('render_device', 'NOT SET')}")
-        logger.info(f"TeacherEnv.__init__: task_config keys = {list(task_config.keys())}")
+        logger.debug(f"TeacherEnv.__init__: render_device = {task_config.get('render_device', 'NOT SET')}")
         kwargs.pop("phase", None)
         super().__init__(task_config, phase="teacher", **kwargs)
 

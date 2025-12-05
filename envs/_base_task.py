@@ -35,6 +35,7 @@ from pathlib import Path
 import trimesh
 import imageio
 import glob
+import sys
 
 
 from ._GLOBAL_CONFIGS import *
@@ -90,7 +91,7 @@ class Base_Task(gym.Env):
         random_setting = kwags.get("domain_randomization") or {}
         self.random_background = random_setting.get("random_background", False)
         self.cluttered_table = random_setting.get("cluttered_table", False)
-        _logger.info(f"Domain randomization: cluttered_table={self.cluttered_table}, random_bg={self.random_background}")
+        _logger.debug(f"Domain randomization: cluttered_table={self.cluttered_table}, random_bg={self.random_background}")
         # clean_background_rate: probability of NOT adding cluttered objects (0 = always add, 1 = never add)
         self.clean_background_rate = random_setting.get("clean_background_rate", 0)
         self.random_head_camera_dis = random_setting.get("random_head_camera_dis", 0)
@@ -134,13 +135,13 @@ class Base_Task(gym.Env):
 
         self.instruction = None  # for Eval
 
-        _logger.info("    [1/5] Creating table and wall...")
+        _logger.debug("    [1/5] Creating table and wall...")
         self.create_table_and_wall(table_xy_bias=table_xy_bias, table_height=0.74)
-        _logger.info("    [2/5] Loading robot...")
+        _logger.debug("    [2/5] Loading robot...")
         self.load_robot(**kwags)
-        _logger.info("    [3/5] Loading cameras...")
+        _logger.debug("    [3/5] Loading cameras...")
         self.load_camera(**kwags)
-        _logger.info("    [4/5] Moving robot to home state...")
+        _logger.debug("    [4/5] Moving robot to home state...")
         self.robot.move_to_homestate()
 
         render_freq = self.render_freq
@@ -149,14 +150,14 @@ class Base_Task(gym.Env):
         self.render_freq = render_freq
 
         self.robot.set_origin_endpose()
-        _logger.info("    [5/5] Loading actors...")
+        _logger.debug("    [5/5] Loading actors...")
         self.load_actors()
 
         if self.cluttered_table:
-            _logger.info("    [+] Creating cluttered table...")
+            _logger.debug("    [+] Creating cluttered table...")
             self.get_cluttered_table()
 
-        _logger.info("    Checking scene stability...")
+        _logger.debug("    Checking scene stability...")
         is_stable, unstable_list = self.check_stable()
         if not is_stable:
             raise UnStableError(
@@ -245,21 +246,16 @@ class Base_Task(gym.Env):
             if env_device is not None:
                 render_device = int(env_device)
         
-        # Use print instead of logger to ensure output even in non-main processes
-        import sys
-        print(f"[PID {os.getpid()}] SAPIEN render_device: {render_device} (from config or env)", file=sys.stderr, flush=True)
-        _logger.info(f"SAPIEN render_device from config: {render_device}")
+        _logger.debug(f"SAPIEN render_device: {render_device}")
         
         # SAPIEN 3.0 API: Create RenderSystem with specific device, then pass to Scene
         # The old SapienRenderer API is deprecated and ignores device parameter
         if render_device is not None:
             device = sapien.Device(f"cuda:{render_device}")
-            print(f"[PID {os.getpid()}] Creating RenderSystem with device: cuda:{render_device}", file=sys.stderr, flush=True)
-            _logger.info(f"Creating RenderSystem with device: cuda:{render_device}")
+            _logger.debug(f"Creating RenderSystem with device: cuda:{render_device}")
             render_system = sapien.render.RenderSystem(device)
         else:
-            print(f"[PID {os.getpid()}] Creating RenderSystem with default device", file=sys.stderr, flush=True)
-            _logger.info("Creating RenderSystem with default device")
+            _logger.debug("Creating RenderSystem with default device")
             render_system = sapien.render.RenderSystem()
 
         # Render mode: "rt" for ray-tracing (high quality), "rasterize" for faster rendering
