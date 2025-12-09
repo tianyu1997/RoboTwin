@@ -2,11 +2,11 @@
 """
 Adversarial Training Script for F1-VLA (Phase 3)
 
-Refactored version using shared rl_training_common module.
+Refactored version matching train_student_rl.py structure and improvements.
 
 Phase 3 Training:
-- World Model (WM): Tries to accurately predict the next frame
-- Explorer (Policy): Tries to find actions that make WM's predictions fail
+- World Model (WM): Tries to accurately predict the next frame (Teacher Policy in WM mode)
+- Explorer (Policy): Tries to find actions that make WM's predictions fail (Student Policy)
 
 The training alternates between:
 1. WM update: Minimize prediction error on current explorer's actions
@@ -55,6 +55,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Callable
 from collections import deque
+import copy
+from tqdm import tqdm
 
 import numpy as np
 import torch
@@ -62,7 +64,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.tensorboard import SummaryWriter
 from omegaconf import OmegaConf
 
 # Import shared utilities
@@ -74,7 +75,11 @@ from rl.training.rl_training_common import (
     load_f1_policy,
     BatchBuilder,
     MemoryStateManager,
+    BaseRLTrainer,
+    setup_optimizer,
+    setup_scheduler,
     clip_gradients,
+    count_trainable_params,
     setup_logging_from_config,
     set_policy_requires_grad,
 )
@@ -109,7 +114,7 @@ def parse_args():
     
     # Checkpoints (required)
     parser.add_argument("--teacher_checkpoint", type=str, required=True,
-                       help="Path to teacher checkpoint")
+                       help="Path to teacher checkpoint (acts as World Model)")
     parser.add_argument("--student_checkpoint", type=str, default=None,
                        help="Path to student (explorer) checkpoint from Phase 2")
     
@@ -127,6 +132,8 @@ def parse_args():
     # Resume training
     parser.add_argument("--resume", type=str, default=None,
                        help="Resume adversarial training from checkpoint")
+    parser.add_argument("--auto_resume", action="store_true", default=False,
+                       help="Automatically resume from latest checkpoint in output_dir")
     
     # DDP and multi-environment options
     parser.add_argument("--num_envs", type=int, default=1,
@@ -135,133 +142,6 @@ def parse_args():
                        help="Use distributed data parallel training")
     
     return parser.parse_args()
-
-
-# =============================================================================
-# Replay Buffer
-# =============================================================================
-
-class ReplayBuffer:
-    """Replay buffer with memory state support for adversarial training."""
-    
-    def __init__(self, capacity: int = 100000):
-        self.capacity = capacity
-        self.buffer = []
-        self.position = 0
-    
-    def push(
-        self,
-        obs_before: Dict[str, np.ndarray],
-        action: np.ndarray,
-        obs_after: Dict[str, np.ndarray],
-        state_before: np.ndarray,
-        state_after: np.ndarray,
-        memory_state: Optional[torch.Tensor] = None,
-    ):
-        """Store a transition with optional memory state."""
-        data = {
-            "obs_before": {k: v.copy() for k, v in obs_before.items()},
-            "action": action.copy(),
-            "obs_after": {k: v.copy() for k, v in obs_after.items()},
-            "state_before": state_before.copy(),
-            "state_after": state_after.copy(),
-            "memory_state": memory_state,
-        }
-        
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(data)
-        else:
-            self.buffer[self.position] = data
-        self.position = (self.position + 1) % self.capacity
-    
-    def sample(self, batch_size: int) -> List[Dict[str, Any]]:
-        """Sample a batch of transitions."""
-        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
-        return [self.buffer[i] for i in indices]
-    
-    def __len__(self) -> int:
-        return len(self.buffer)
-
-
-# =============================================================================
-# Explorer Policy Network
-# =============================================================================
-
-class ExplorerPolicy(nn.Module):
-    """Explorer policy network for adversarial training."""
-    
-    def __init__(
-        self,
-        state_dim: int = 32,
-        action_dim: int = 32,
-        hidden_dim: int = 256,
-        image_encoder_dim: int = 512,
-    ):
-        super().__init__()
-        
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        
-        # Image encoder (simple CNN)
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=8, stride=4, padding=2),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4)),
-            nn.Flatten(),
-            nn.Linear(64 * 4 * 4, image_encoder_dim),
-            nn.ReLU(),
-        )
-        
-        # Policy network
-        self.policy_net = nn.Sequential(
-            nn.Linear(image_encoder_dim + state_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-        )
-        
-        # Action mean and std
-        self.action_mean = nn.Linear(hidden_dim, action_dim)
-        self.action_log_std = nn.Parameter(torch.zeros(action_dim))
-    
-    def forward(
-        self,
-        state: torch.Tensor,
-        image: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass."""
-        img_features = self.image_encoder(image)
-        x = torch.cat([img_features, state], dim=-1)
-        x = self.policy_net(x)
-        
-        action_mean = torch.tanh(self.action_mean(x))
-        action_std = torch.exp(self.action_log_std).expand_as(action_mean)
-        
-        return action_mean, action_std
-    
-    def sample_action(
-        self,
-        state: torch.Tensor,
-        image: torch.Tensor,
-        deterministic: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Sample action from policy."""
-        action_mean, action_std = self.forward(state, image)
-        
-        if deterministic:
-            return action_mean, torch.zeros_like(action_mean)
-        
-        noise = torch.randn_like(action_mean) * action_std
-        action = torch.clamp(action_mean + noise, -1.0, 1.0)
-        
-        dist = torch.distributions.Normal(action_mean, action_std)
-        log_prob = dist.log_prob(action).sum(dim=-1)
-        
-        return action, log_prob
 
 
 # =============================================================================
@@ -287,6 +167,17 @@ class WorldModelWrapper(nn.Module):
         # Use proper gradient configuration
         self._configure_for_wm_training()
     
+    def _get_unwrapped_policy(self):
+        """Get the unwrapped F1_VLA model from PEFT/DDP wrappers."""
+        policy = self.f1_policy
+        
+        # Unwrap PEFT model if present
+        if hasattr(policy, 'base_model'):
+            # PeftModel -> base_model (LoraModel) -> model (F1_VLA)
+            if hasattr(policy.base_model, 'model'):
+                return policy.base_model.model
+        return policy
+    
     def _init_memory_state(self, batch_size: int) -> torch.Tensor:
         """Initialize memory state to zeros for first frame."""
         memory_state = torch.zeros(
@@ -296,18 +187,18 @@ class WorldModelWrapper(nn.Module):
             device=self.device,
             dtype=torch.float32
         )
-        logger.debug(f"WorldModelWrapper: initialized zero memory state: shape={memory_state.shape}")
         return memory_state
     
     def _configure_for_wm_training(self):
         """Configure model for world model training only."""
-        # Use set_requires_grad for proper gradient configuration
+        # Get unwrapped model for proper gradient configuration
+        unwrapped = self._get_unwrapped_policy()
         set_policy_requires_grad(
-            self.f1_policy,
-            freeze_vision_encoder=True,   # Freeze vision encoder
-            freeze_gen_expert=False,      # Unfreeze world model
+            unwrapped,
+            freeze_vision_encoder=True,
+            freeze_gen_expert=False,
             train_act_expert_only=False,
-            train_gen_expert_only=True,   # Only train world model
+            train_gen_expert_only=True,
         )
     
     def unfreeze_wm_params(self):
@@ -331,17 +222,13 @@ class WorldModelWrapper(nn.Module):
             batch_size = batch["observation.state"].shape[0]
             batch["initial_memory_state"] = self._init_memory_state(batch_size)
         
-        # Validate memory state is not None
-        if batch["initial_memory_state"] is None:
-            raise ValueError("CRITICAL: initial_memory_state is None in predict_next_frame!")
-        
-        output = self.f1_policy.predict_images_only(batch)
+        # Get unwrapped policy and call predict_images_only
+        unwrapped = self._get_unwrapped_policy()
+        output = unwrapped.predict_images_only(batch)
         
         # Update memory state
         if "memory_state" in output and output["memory_state"] is not None:
             self.memory_manager.update(output["memory_state"])
-        else:
-            logger.warning("predict_images_only returned None memory_state")
         
         return output["pred_imgs"]
     
@@ -352,7 +239,7 @@ class WorldModelWrapper(nn.Module):
     ) -> torch.Tensor:
         """Compute prediction loss."""
         if pred_imgs.shape[-2:] != gt_imgs.shape[-2:]:
-            gt_imgs = F.interpolate(gt_imgs, size=pred_imgs.shape[-2:], mode="bilinear")
+            pred_imgs = F.interpolate(pred_imgs, size=gt_imgs.shape[-2:], mode='bilinear', align_corners=False)
         return F.mse_loss(pred_imgs, gt_imgs)
 
 
@@ -360,33 +247,25 @@ class WorldModelWrapper(nn.Module):
 # Adversarial Trainer
 # =============================================================================
 
-class AdversarialTrainer:
+class AdversarialTrainer(BaseRLTrainer):
     """
     Adversarial trainer for WM vs Explorer.
     
-    Supports DDP via HuggingFace Accelerate and multi-environment collection
-    via gymnasium's SyncVectorEnv.
+    Supports DDP via HuggingFace Accelerate and multi-environment collection.
     """
     
     def __init__(
         self,
         rl_config: OmegaConf,
         env,
-        explorer: ExplorerPolicy,
+        student_policy: nn.Module,
         world_model: WorldModelWrapper,
+        policy_config,
         model_config_file: str,
         device: str = "cuda",
         accelerator: Optional[AcceleratorWrapper] = None,
         num_envs: int = 1,
     ):
-        self.rl_config = rl_config
-        self.env = env
-        self.explorer = explorer
-        self.world_model = world_model
-        self.device = device
-        self.accelerator = accelerator
-        self.num_envs = num_envs
-        
         # Load model config to get n_obs_img_steps and stride
         import yaml
         with open(model_config_file, 'r') as f:
@@ -403,40 +282,74 @@ class AdversarialTrainer:
         # Get configs
         train_config = get_training_config(rl_config)
         adv_config = rl_config.get("adversarial", {})
+        output_dir = adv_config.get("output_dir", "outputs/adversarial_rl")
+        
+        # Override config with values from model config
+        self.n_pred_img_steps = train_config.n_pred_img_steps
+        train_config.history_length = self.n_obs_img_steps  # observation buffer
+        
+        super().__init__(
+            policy=student_policy,
+            config=train_config,
+            output_dir=output_dir,
+            device=device,
+            accelerator=accelerator,
+        )
+        
+        self.rl_config = rl_config
+        self.env = env
+        self.student_policy = student_policy
+        self.world_model = world_model
+        self.policy_config = policy_config
+        self.num_envs = num_envs
         
         self.cur_n_obs_img_steps = self.n_obs_img_steps
         self.cur_n_pred_img_steps = train_config.n_pred_img_steps
         self.sequential_training = train_config.sequential_training
         
-        # history_length is the observation buffer size
-        self.history_length = self.n_obs_img_steps
-        
-        print(f"Adversarial training config from {model_config_file}:")
-        print(f"  n_obs_img_steps: {self.n_obs_img_steps}")
-        print(f"  n_pred_img_steps: {self.cur_n_pred_img_steps}")
-        print(f"  history_length: {self.history_length}")
-        
         # Training parameters
-        self.batch_size = train_config.batch_size
         self.wm_updates_per_iter = adv_config.get("wm_updates_per_iter", 5)
         self.explorer_updates_per_iter = adv_config.get("explorer_updates_per_iter", 1)
         self.warmup_steps = adv_config.get("warmup_steps", 1000)
         self.adversarial_weight = adv_config.get("adversarial_weight", 0.5)
         self.entropy_weight = adv_config.get("entropy_weight", 0.01)
         
+        # PPO parameters for Explorer
+        student_config = rl_config.get("student", {})
+        ppo_config = student_config.get("ppo", {})
+        self.ppo_config = ppo_config
+        self.clip_epsilon = ppo_config.get("clip_epsilon", 0.2)
+        self.entropy_coef = ppo_config.get("entropy_coef", 0.02)
+        self.value_loss_coef = ppo_config.get("value_loss_coef", 0.5)
+        self.gamma = ppo_config.get("gamma", 0.99)
+        self.gae_lambda = ppo_config.get("gae_lambda", 0.95)
+        
+        # Value head for PPO
+        proj_width = policy_config.proj_width if hasattr(policy_config, 'proj_width') else 1024
+        self.value_head = nn.Linear(proj_width, 1).to(device)
+        self.log_std = nn.Parameter(torch.zeros(train_config.action_dim, device=device))
+        
         # Batch builder - adversarial uses wrist camera only for VLM (like student)
         self.batch_builder = BatchBuilder(
             device=device,
             image_keys=["head_rgb", "wrist_rgb"],
-            use_head_camera=False,  # Adversarial: wrist_rgb only (image0) for VLM
+            use_head_camera=False,
         )
         
         # Optimizers
+        # Explorer (Student) Optimizer
+        param_groups = [
+            {'params': self.student_policy.parameters()},
+            {'params': self.value_head.parameters()},
+            {'params': [self.log_std]},
+        ]
         self.explorer_optimizer = AdamW(
-            explorer.parameters(),
+            param_groups,
             lr=adv_config.get("explorer_lr", 3e-4),
             weight_decay=train_config.weight_decay,
         )
+        
+        # World Model Optimizer
         self.wm_optimizer = AdamW(
             filter(lambda p: p.requires_grad, world_model.parameters()),
             lr=adv_config.get("wm_lr", 1e-4),
@@ -448,43 +361,39 @@ class AdversarialTrainer:
         self.explorer_scheduler = CosineAnnealingLR(self.explorer_optimizer, T_max=total_iterations)
         self.wm_scheduler = CosineAnnealingLR(self.wm_optimizer, T_max=total_iterations)
         
-        # Prepare for DDP if accelerator is provided
-        if self.accelerator is not None:
-            # Prepare explorer and its optimizer
-            self.explorer, self.explorer_optimizer, self.explorer_scheduler = self.accelerator.prepare(
-                self.explorer, self.explorer_optimizer, self.explorer_scheduler
-            )
-            # Prepare WM and its optimizer
-            self.world_model, self.wm_optimizer, self.wm_scheduler = self.accelerator.prepare(
-                self.world_model, self.wm_optimizer, self.wm_scheduler
-            )
-            self._print(f"DDP setup complete: {self.accelerator.num_processes} processes")
+        # Memory configuration
+        self.memory_enabled = policy_config.memory_enabled if hasattr(policy_config, 'memory_enabled') else True
+        self.memory_hidden = policy_config.memory_hidden if hasattr(policy_config, 'memory_hidden') else 2048
+        self.memory_num_layers = policy_config.memory_num_layers if hasattr(policy_config, 'memory_num_layers') else 4
         
-        # Replay buffer (uses SequentialEpisodeBuffer for parallel collection)
-        if self.num_envs > 1:
-            self.replay_buffer = SequentialEpisodeBuffer(
-                max_episodes=1000, max_transitions=100000
-            )
-        else:
-            self.replay_buffer = ReplayBuffer(capacity=adv_config.get("buffer_size", 100000))
-        
-        # Memory manager for episode collection
-        self.memory_manager = MemoryStateManager()
+        self.student_memory = MemoryStateManager()
         
         # Multi-env collector
         self.env_collector = None  # Set in setup_multi_env if needed
         
-        # Logging (only on main process)
-        self.output_dir = Path(adv_config.get("output_dir", "outputs/adversarial_rl"))
-        if self._is_main_process():
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            self.writer = SummaryWriter(self.output_dir / "tensorboard")
-        else:
-            self.writer = None
-        
         # Tracking
         self.global_step = 0
         self.episode_count = 0
+        
+        # Metrics
+        self.metrics.update({
+            "policy_loss": deque(maxlen=100),
+            "value_loss": deque(maxlen=100),
+            "entropy": deque(maxlen=100),
+            "wm_loss": deque(maxlen=100),
+            "adversarial_reward": deque(maxlen=100),
+            "episode_reward": deque(maxlen=100),
+        })
+        
+        # Prepare for DDP
+        if self.accelerator is not None:
+            self.student_policy, self.explorer_optimizer, self.explorer_scheduler = self.accelerator.prepare(
+                self.student_policy, self.explorer_optimizer, self.explorer_scheduler
+            )
+            self.world_model, self.wm_optimizer, self.wm_scheduler = self.accelerator.prepare(
+                self.world_model, self.wm_optimizer, self.wm_scheduler
+            )
+            self._print(f"DDP setup complete: {self.accelerator.num_processes} processes")
     
     def _print(self, msg: str):
         """Print only on main process."""
@@ -503,373 +412,390 @@ class AdversarialTrainer:
             self.env_collector = ParallelEnvCollector(
                 env_fn=env_fn,
                 num_envs=self.num_envs,
+                is_main_process=self._is_main_process(),
             )
             self.env_collector.initialize()
-            self._print(f"Multi-env collector setup: {self.num_envs} envs")
-        
-        # Tracking
-        self.global_step = 0
-        self.episode_count = 0
+            self._print(f"Parallel env collector setup: {self.num_envs} envs")
     
-    def collect_trajectory(self, num_steps: int = 50) -> Dict[str, float]:
-        """Collect trajectory using current explorer policy."""
+    def _init_memory_state(self, batch_size: int) -> torch.Tensor:
+        """Initialize memory state to zeros for first frame."""
+        memory_state = torch.zeros(
+            self.memory_num_layers,
+            batch_size,
+            self.memory_hidden,
+            device=self.device,
+            dtype=torch.float32
+        )
+        return memory_state
+
+    def _obs_to_batch(self, obs: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
+        """Convert observation dict to batch tensor dict."""
+        batch = {
+            "observation.state": torch.from_numpy(obs["state"]).float().unsqueeze(0).to(self.device),
+            "action_history": torch.from_numpy(obs["action_history"]).float().unsqueeze(0).to(self.device),
+            "task": ["explore the environment\n"],
+        }
+        
+        # Wrist camera for World Model history (always wrist_rgb -> image0_history)
+        if "wrist_rgb" in obs:
+            wrist_imgs = obs["wrist_rgb"]
+            current_wrist = wrist_imgs[-1]  # Last frame for current observation
+            
+            # World Model uses wrist_rgb history
+            batch["observation.images.image0_history"] = (
+                torch.from_numpy(wrist_imgs).float().to(self.device) / 255.0 * 2.0 - 1.0
+            ).unsqueeze(0)
+            
+            # Student uses wrist_rgb as image0 for Paligemma
+            batch["observation.images.image0"] = (
+                torch.from_numpy(current_wrist).float().to(self.device) / 255.0 * 2.0 - 1.0
+            ).unsqueeze(0)
+            batch["observation.images.image0_mask"] = torch.ones(1, dtype=torch.bool, device=self.device)
+        
+        return batch
+
+    def _forward_explorer(
+        self,
+        batch: Dict[str, torch.Tensor],
+        deterministic: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward pass through explorer (student) model.
+        """
+        # Unwrap DDP model if needed
+        policy = self.accelerator.unwrap_model(self.student_policy) if self.accelerator else self.student_policy
+        
+        # Access the underlying F1FlowMatching model through PEFT wrapper
+        if hasattr(policy, 'base_model'):
+            if hasattr(policy.base_model, 'model'):
+                f1_model = policy.base_model.model
+            else:
+                f1_model = policy.base_model
+        else:
+            f1_model = policy
+        
+        # Use student model to generate actions
+        noise = torch.randn(
+            batch["observation.state"].shape[0], self.policy_config.chunk_size,
+            self.policy_config.max_action_dim,
+            device=self.device
+        )
+        
+        # Prepare state with padding
+        state = batch["observation.state"]
+        if state.shape[-1] < self.policy_config.max_state_dim:
+            padding = torch.zeros(
+                state.shape[0], self.policy_config.max_state_dim - state.shape[-1],
+                device=self.device
+            )
+            state = torch.cat([state, padding], dim=-1)
+        
+        # Sample actions from F1FlowMatching model
+        image0 = batch.get("observation.images.image0")
+        batch_size = image0.shape[0] if image0 is not None else state.shape[0]
+        image0_mask = batch.get("observation.images.image0_mask", 
+                               torch.ones(batch_size, dtype=torch.bool, device=self.device))
+        
+        # Inject memory state
+        initial_memory_state = batch.get("initial_memory_state")
+        
+        # Forward pass
+        output = f1_model(
+            input_ids=None, # Not used for pure vision/state policy
+            pixel_values=image0,
+            pixel_mask=image0_mask,
+            state=state,
+            action=None, # We want to sample actions
+            noise=noise,
+            task=batch.get("task"),
+            initial_memory_state=initial_memory_state,
+            train_act_expert_only=True,
+        )
+        
+        actions = output.get("actions") # [B, action_dim]
+        
+        # Compute log_probs
+        action_mean = actions
+        action_std = torch.exp(self.log_std).expand_as(action_mean)
+        dist = torch.distributions.Normal(action_mean, action_std)
+        
+        if deterministic:
+            sampled_action = action_mean
+        else:
+            sampled_action = action_mean + action_std * torch.randn_like(action_mean)
+            
+        log_probs = dist.log_prob(sampled_action).sum(-1)
+        
+        # Value estimate
+        memory_state = output.get("memory_state")
+        if memory_state is not None:
+            value_input = memory_state[-1]
+            values = self.value_head(value_input).squeeze(-1)
+        else:
+            values = torch.zeros(batch_size, device=self.device)
+            
+        return sampled_action, log_probs, values, memory_state
+
+    def collect_episode(self, use_tqdm: bool = False) -> List[Dict[str, Any]]:
+        """Collect one episode using explorer policy."""
         obs, info = self.env.reset()
+        transitions = []
         
         # Reset memory states
-        self.memory_manager.reset()
+        self.student_memory.reset()
         self.world_model.reset_memory()
         
-        episode_wm_loss = 0.0
-        episode_steps = 0
+        done = False
+        step = 0
         
-        for _ in range(num_steps):
-            # Get state and image (use wrist_rgb for explorer input)
-            state = torch.from_numpy(obs["state"]).float().to(self.device).unsqueeze(0)
+        while not done:
+            # Build batch for explorer
+            batch = self._obs_to_batch(obs)
             
-            # Get wrist camera image for explorer (VLM uses wrist only in adversarial phase)
-            wrist_key = "wrist_rgb" if "wrist_rgb" in obs else "left_wrist_rgb"
-            if wrist_key in obs:
-                wrist_img = obs[wrist_key]
-                # Handle both single frame and history
-                if wrist_img.ndim == 4:
-                    wrist_img = wrist_img[-1]  # Take last frame
-                image = torch.from_numpy(wrist_img).float().to(self.device).unsqueeze(0)
-                image = image / 255.0 * 2.0 - 1.0
+            # Inject student memory state
+            if self.student_memory.current_memory is not None:
+                batch["initial_memory_state"] = self.student_memory.current_memory
             else:
-                image = torch.zeros(1, 3, 224, 224, device=self.device)
+                batch["initial_memory_state"] = self._init_memory_state(1)
             
-            # Sample action from explorer
+            # Get action from explorer
             with torch.no_grad():
-                action, _ = self.explorer.sample_action(state, image)
-                action_np = action.cpu().numpy().flatten()
+                actions, log_probs, values, student_memory_out = self._forward_explorer(batch)
             
-            # Store observation before action (store both cameras for WM)
-            raw_obs = self.env.task.get_observation() if hasattr(self.env.task, 'get_observation') else obs
-            obs_before = {
-                "head_rgb": raw_obs.get("head_rgb", np.zeros((3, 224, 224), dtype=np.uint8)),
-                "wrist_rgb": raw_obs.get("wrist_rgb", raw_obs.get("left_wrist_rgb", np.zeros((3, 224, 224), dtype=np.uint8))),
-                "wrist_rgb_history": obs.get("wrist_rgb", obs.get("left_wrist_rgb")),  # Full history
-            }
-            state_before = obs["state"].copy()
-            memory_state_before = (
-                self.memory_manager.current_memory.detach().clone()
-                if self.memory_manager.current_memory is not None else None
-            )
+            # Update student memory
+            if student_memory_out is not None:
+                self.student_memory.update(student_memory_out)
+            
+            action = actions[0].cpu().numpy()
+            log_prob = log_probs[0].item()
+            value = values[0].item()
             
             # Execute action
-            next_obs, reward, terminated, truncated, info = self.env.step(action_np)
+            next_obs, env_reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
             
-            # Store observation after action
-            raw_obs_after = self.env.task.get_observation() if hasattr(self.env.task, 'get_observation') else next_obs
-            obs_after = {
-                "head_rgb": raw_obs_after.get("head_rgb", np.zeros((3, 224, 224), dtype=np.uint8)),
-                "wrist_rgb": raw_obs_after.get("wrist_rgb", raw_obs_after.get("left_wrist_rgb", np.zeros((3, 224, 224), dtype=np.uint8))),
-            }
-            state_after = next_obs["state"].copy()
+            # Compute Adversarial Reward
+            wm_batch = batch.copy()
+            with torch.no_grad():
+                pred_imgs = self.world_model.predict_next_frame(wm_batch)
             
-            # Store in replay buffer
-            self.replay_buffer.push(
-                obs_before, action_np, obs_after, state_before, state_after,
-                memory_state=memory_state_before,
-            )
+            # Get ground truth next frame (wrist_rgb)
+            if "wrist_rgb" in next_obs:
+                gt_img = next_obs["wrist_rgb"][-1] # [C, H, W]
+                gt_tensor = torch.from_numpy(gt_img).float().to(self.device).unsqueeze(0) / 255.0 * 2.0 - 1.0
+                
+                # Compute MSE
+                mse = F.mse_loss(pred_imgs, gt_tensor)
+                
+                # Reward: Maximize MSE -> Reward = MSE
+                reward = mse.item() * self.adversarial_weight
+            else:
+                reward = 0.0
             
-            episode_wm_loss += info.get("wm_uncertainty", 0.0)
-            episode_steps += 1
+            transitions.append({
+                "obs": obs,
+                "action": action,
+                "log_prob": log_prob,
+                "value": value,
+                "reward": reward,
+                "next_obs": next_obs,
+                "done": done,
+                "info": {**info, "adversarial_reward": reward},
+            })
             
             obs = next_obs
-            
-            if terminated or truncated:
-                break
+            step += 1
         
-        self.episode_count += 1
+        # Compute advantages
+        self._compute_advantages(transitions)
         
-        return {
-            "episode_steps": episode_steps,
-            "episode_wm_loss": episode_wm_loss / max(episode_steps, 1),
-        }
-    
-    def update_world_model(self) -> Dict[str, float]:
-        """Update world model to minimize prediction error."""
-        if len(self.replay_buffer) < self.batch_size:
-            return {"wm_loss": 0.0}
+        return transitions
+
+    def _compute_advantages(self, transitions: List[Dict[str, Any]]):
+        """Compute GAE advantages for PPO."""
+        rewards = [t["reward"] for t in transitions]
+        values = [t["value"] for t in transitions]
+        dones = [t["done"] for t in transitions]
         
-        total_loss = 0.0
+        next_value = 0.0 if dones[-1] else values[-1]
+        advantages = []
+        gae = 0.0
         
-        for _ in range(self.wm_updates_per_iter):
-            batch_data = self.replay_buffer.sample(self.batch_size)
-            
-            # Helper to process image: handle CHW (from env) or HWC formats
-            def process_image(img):
-                """Convert image to tensor, handling both CHW and HWC formats."""
-                if img is None:
-                    return torch.zeros(3, 224, 224, device=self.device)
-                img_t = torch.from_numpy(img).float().to(self.device)
-                # If HWC format, convert to CHW
-                if img_t.ndim == 3 and img_t.shape[-1] == 3:
-                    img_t = img_t.permute(2, 0, 1)
-                return img_t / 255.0 * 2.0 - 1.0  # Normalize to [-1, 1]
-            
-            # Use wrist_rgb for both VLM input and WM (adversarial phase)
-            # Current wrist image for VLM (image0)
-            obs_before_imgs = torch.stack([
-                process_image(d["obs_before"].get("wrist_rgb"))
-                for d in batch_data
-            ])
-            
-            # Ground truth next frame
-            obs_after_imgs = torch.stack([
-                process_image(d["obs_after"].get("wrist_rgb"))
-                for d in batch_data
-            ])
-            
-            # Image history for world model (if available)
-            wrist_histories = []
-            for d in batch_data:
-                hist = d["obs_before"].get("wrist_rgb_history")
-                if hist is not None and hist.ndim == 4:  # [T, C, H, W]
-                    hist_t = torch.from_numpy(hist).float().to(self.device) / 255.0 * 2.0 - 1.0
-                    wrist_histories.append(hist_t)
-                else:
-                    # Use current image repeated if no history
-                    wrist_histories.append(obs_before_imgs[len(wrist_histories)].unsqueeze(0).expand(self.n_obs_img_steps, -1, -1, -1))
-            
-            actions = torch.stack([
-                torch.from_numpy(d["action"]).float()
-                for d in batch_data
-            ]).to(self.device)
-            
-            states = torch.stack([
-                torch.from_numpy(d["state_before"]).float()
-                for d in batch_data
-            ]).to(self.device)
-            
-            # Memory states
-            memory_states = [d.get("memory_state") for d in batch_data]
-            
-            # Build batch with proper keys
-            batch = {
-                "observation.images.image0": obs_before_imgs,  # Current wrist for VLM
-                "observation.images.image0_mask": torch.ones(len(batch_data), dtype=torch.bool, device=self.device),
-                "observation.images.image0_history": torch.stack(wrist_histories),  # Wrist history for WM
-                "observation.state": states,
-                "action": actions,
-                "task": ["explore the environment\n"] * len(batch_data),
-            }
-            
-            # Inject memory states if available
-            if valid_states := [ms for ms in memory_states if ms is not None]:
-                if len(valid_states) == len(batch_data):
-                    batch["initial_memory_state"] = torch.stack(valid_states)
-            
-            # Forward pass
-            self.wm_optimizer.zero_grad()
-            pred_imgs = self.world_model.predict_next_frame(batch)
-            
-            # Compute loss
-            loss = self.world_model.compute_prediction_loss(pred_imgs, obs_after_imgs)
-            
-            # Backward and update
-            loss.backward()
-            clip_gradients(self.world_model, max_norm=1.0)
-            self.wm_optimizer.step()
-            
-            total_loss += loss.item()
+        for i in reversed(range(len(transitions))):
+            next_val = next_value if i == len(transitions) - 1 else values[i + 1]
+            delta = rewards[i] + self.gamma * next_val * (1 - dones[i]) - values[i]
+            gae = delta + self.gamma * self.gae_lambda * (1 - dones[i]) * gae
+            advantages.insert(0, gae)
         
-        self.wm_scheduler.step()
+        for i, t in enumerate(transitions):
+            t["advantage"] = advantages[i]
+            t["return"] = advantages[i] + values[i]
+
+    def train_step_explorer(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """Execute one PPO training step for Explorer."""
+        batch_size = batch["observation.state"].shape[0]
+        mini_batch_size = self.config.mini_batch_size
         
-        return {"wm_loss": total_loss / self.wm_updates_per_iter}
-    
-    def update_explorer(self) -> Dict[str, float]:
-        """Update explorer to maximize WM prediction error."""
-        if len(self.replay_buffer) < self.batch_size:
-            return {"explorer_loss": 0.0}
-        
-        total_loss = 0.0
-        total_adv_reward = 0.0
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
         total_entropy = 0.0
+        num_mini_batches = 0
         
-        for _ in range(self.explorer_updates_per_iter):
-            batch_data = self.replay_buffer.sample(self.batch_size)
+        indices = torch.randperm(batch_size)
+        
+        for start in range(0, batch_size, mini_batch_size):
+            end = min(start + mini_batch_size, batch_size)
+            mb_indices = indices[start:end]
             
-            # Helper to process image
-            def process_image(img):
-                """Convert image to tensor, handling both CHW and HWC formats."""
-                if img is None:
-                    return torch.zeros(3, 224, 224, device=self.device)
-                img_t = torch.from_numpy(img).float().to(self.device)
-                if img_t.ndim == 3 and img_t.shape[-1] == 3:
-                    img_t = img_t.permute(2, 0, 1)
-                return img_t / 255.0 * 2.0 - 1.0
-            
-            # Use wrist_rgb for explorer (adversarial phase)
-            obs_before_imgs = torch.stack([
-                process_image(d["obs_before"].get("wrist_rgb"))
-                for d in batch_data
-            ])
-            
-            obs_after_imgs = torch.stack([
-                process_image(d["obs_after"].get("wrist_rgb"))
-                for d in batch_data
-            ])
-            
-            # Image history for world model
-            wrist_histories = []
-            for d in batch_data:
-                hist = d["obs_before"].get("wrist_rgb_history")
-                if hist is not None and hist.ndim == 4:
-                    hist_t = torch.from_numpy(hist).float().to(self.device) / 255.0 * 2.0 - 1.0
-                    wrist_histories.append(hist_t)
-                else:
-                    wrist_histories.append(obs_before_imgs[len(wrist_histories)].unsqueeze(0).expand(self.n_obs_img_steps, -1, -1, -1))
-            
-            states = torch.stack([
-                torch.from_numpy(d["state_before"]).float()
-                for d in batch_data
-            ]).to(self.device)
-            
-            # Sample actions from explorer
-            self.explorer_optimizer.zero_grad()
-            action_mean, action_std = self.explorer(states, obs_before_imgs)
-            
-            noise = torch.randn_like(action_mean) * action_std
-            actions = torch.clamp(action_mean + noise, -1.0, 1.0)
-            
-            # Compute entropy bonus
-            dist = torch.distributions.Normal(action_mean, action_std)
-            entropy = dist.entropy().mean()
-            
-            # Build batch for WM with proper keys
-            batch = {
-                "observation.images.image0": obs_before_imgs,
-                "observation.images.image0_mask": torch.ones(len(batch_data), dtype=torch.bool, device=self.device),
-                "observation.images.image0_history": torch.stack(wrist_histories),
-                "observation.state": states,
-                "action": actions,
-                "task": ["explore the environment\n"] * len(batch_data),
+            mb_batch = {
+                "observation.state": batch["observation.state"][mb_indices],
+                "action_history": batch["action_history"][mb_indices],
+                "task": [batch["task"][i] for i in mb_indices.tolist()],
             }
+            if "observation.images.image0_history" in batch:
+                mb_batch["observation.images.image0_history"] = batch["observation.images.image0_history"][mb_indices]
+                mb_batch["observation.images.image0"] = batch["observation.images.image0"][mb_indices]
+                mb_batch["observation.images.image0_mask"] = batch["observation.images.image0_mask"][mb_indices]
             
-            # Get WM prediction
-            with torch.no_grad():
-                pred_imgs = self.world_model.predict_next_frame(batch)
+            self.explorer_optimizer.zero_grad()
             
-            # Adversarial reward
-            wm_loss = self.world_model.compute_prediction_loss(pred_imgs, obs_after_imgs)
-            adversarial_reward = wm_loss.detach()
+            actions, log_probs, values, _ = self._forward_explorer(mb_batch)
             
-            # Explorer loss
-            explorer_loss = -self.adversarial_weight * adversarial_reward - self.entropy_weight * entropy
+            mb_old_log_probs = batch["old_log_probs"][mb_indices]
+            mb_advantages = batch["advantages"][mb_indices]
+            mb_returns = batch["returns"][mb_indices]
             
-            # Backward and update
-            explorer_loss.backward()
-            clip_gradients(self.explorer, max_norm=1.0)
+            # Normalize advantages
+            if mb_advantages.std() > 1e-8:
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+            
+            # Policy loss
+            ratio = torch.exp(log_probs - mb_old_log_probs)
+            surr1 = ratio * mb_advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * mb_advantages
+            policy_loss = -torch.min(surr1, surr2).mean()
+            
+            # Value loss
+            value_loss = F.mse_loss(values, mb_returns)
+            
+            # Entropy
+            std = torch.exp(self.log_std)
+            entropy = 0.5 * (1 + torch.log(2 * np.pi * std**2)).sum()
+            
+            loss = policy_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy
+            
+            loss.backward()
+            clip_gradients(self.student_policy, max_norm=self.config.max_grad_norm)
             self.explorer_optimizer.step()
             
-            total_loss += explorer_loss.item()
-            total_adv_reward += adversarial_reward.item()
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
             total_entropy += entropy.item()
-        
-        self.explorer_scheduler.step()
-        
+            num_mini_batches += 1
+            
         return {
-            "explorer_loss": total_loss / self.explorer_updates_per_iter,
-            "adversarial_reward": total_adv_reward / self.explorer_updates_per_iter,
-            "entropy": total_entropy / self.explorer_updates_per_iter,
+            "policy_loss": total_policy_loss / num_mini_batches,
+            "value_loss": total_value_loss / num_mini_batches,
+            "entropy": total_entropy / num_mini_batches,
         }
-    
+
+    def train_step_wm(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """Execute one training step for World Model."""
+        self.wm_optimizer.zero_grad()
+        
+        target_imgs = batch.get("target_images")
+        if target_imgs is None:
+            return {"wm_loss": 0.0}
+            
+        pred_imgs = self.world_model.predict_next_frame(batch)
+        loss = self.world_model.compute_prediction_loss(pred_imgs, target_imgs)
+        
+        loss.backward()
+        self.wm_optimizer.step()
+        
+        return {"wm_loss": loss.item()}
+
+    def _build_ppo_batch(self, transitions: List[Dict]) -> Dict[str, torch.Tensor]:
+        """Convert list of transitions to PPO batch."""
+        batch_size = len(transitions)
+        
+        states = torch.stack([torch.from_numpy(t["obs"]["state"]).float() for t in transitions]).to(self.device)
+        action_histories = torch.stack([torch.from_numpy(t["obs"]["action_history"]).float() for t in transitions]).to(self.device)
+        
+        batch = {
+            "observation.state": states,
+            "action_history": action_histories,
+            "task": ["explore the environment\n"] * batch_size,
+            "old_log_probs": torch.tensor([t["log_prob"] for t in transitions], device=self.device),
+            "advantages": torch.tensor([t["advantage"] for t in transitions], device=self.device),
+            "returns": torch.tensor([t["return"] for t in transitions], device=self.device),
+        }
+        
+        if "wrist_rgb" in transitions[0]["obs"]:
+            # History
+            histories = [torch.from_numpy(t["obs"]["wrist_rgb"]).float() for t in transitions]
+            batch["observation.images.image0_history"] = torch.stack(histories).to(self.device) / 255.0 * 2.0 - 1.0
+            
+            # Current
+            currents = [torch.from_numpy(t["obs"]["wrist_rgb"][-1]).float() for t in transitions]
+            batch["observation.images.image0"] = torch.stack(currents).to(self.device) / 255.0 * 2.0 - 1.0
+            
+            batch["observation.images.image0_mask"] = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+            
+            # Target images for WM (next_obs)
+            targets = [torch.from_numpy(t["next_obs"]["wrist_rgb"][-1]).float() for t in transitions]
+            batch["target_images"] = torch.stack(targets).to(self.device) / 255.0 * 2.0 - 1.0
+            
+        return batch
+
     def train(self, total_iterations: int, start_iteration: int = 0):
         """Main training loop."""
         logger.info(f"Starting adversarial training for {total_iterations} iterations")
-        logger.info(f"Sequential training: {self.sequential_training}")
         
-        for iteration in range(start_iteration, total_iterations):
-            self.global_step += 1
-            
-            # Collect trajectory
-            collect_stats = self.collect_trajectory()
-            
-            # Warmup
-            if self.global_step < self.warmup_steps:
-                if self.global_step % 100 == 0:
-                    logger.info(f"Warmup step {self.global_step}/{self.warmup_steps}, "
-                              f"buffer size: {len(self.replay_buffer)}")
-                continue
-            
-            # Update world model
-            wm_stats = self.update_world_model()
-            
-            # Update explorer
-            explorer_stats = self.update_explorer()
-            
-            # Logging
-            if iteration % 100 == 0:
-                logger.info(
-                    f"Iter {iteration}: "
-                    f"WM Loss: {wm_stats['wm_loss']:.4f}, "
-                    f"Explorer Loss: {explorer_stats['explorer_loss']:.4f}, "
-                    f"Adv Reward: {explorer_stats['adversarial_reward']:.4f}"
+        # Setup environment
+        if self.num_envs > 1:
+            def make_env():
+                from rl.f1_rl_env import F1RLEnv
+                return F1RLEnv(
+                    task_config=self.env_config,
+                    phase="student", # Use student phase for explorer
+                    teacher_policy=self.accelerator.unwrap_model(self.world_model.f1_policy), # Pass teacher policy
+                    history_length=self.n_obs_img_steps,
+                    max_steps=self.config.steps_per_episode,
+                    device=self.device,
                 )
-                
-                self.writer.add_scalar("train/wm_loss", wm_stats["wm_loss"], iteration)
-                self.writer.add_scalar("train/explorer_loss", explorer_stats["explorer_loss"], iteration)
-                self.writer.add_scalar("train/adversarial_reward", explorer_stats["adversarial_reward"], iteration)
-                self.writer.add_scalar("train/entropy", explorer_stats["entropy"], iteration)
+            self.setup_multi_env(make_env)
+        
+        iterator = range(start_iteration, total_iterations)
+        if self._is_main_process():
+            iterator = tqdm(iterator, desc="Adversarial Iterations")
             
-            # Save checkpoint
-            if iteration % 5000 == 0 and iteration > 0:
-                self.save_checkpoint(iteration)
-        
-        self.save_checkpoint(total_iterations)
-        logger.info("Training complete!")
-    
-    def save_checkpoint(self, iteration: int):
-        """Save training checkpoint."""
-        checkpoint_dir = self.output_dir / f"checkpoint-{iteration}"
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        torch.save(self.explorer.state_dict(), checkpoint_dir / "explorer.pt")
-        
-        wm_state_dict = {
-            k: v for k, v in self.world_model.state_dict().items()
-            if "world_model" in k or "wm_" in k
-        }
-        torch.save(wm_state_dict, checkpoint_dir / "world_model.pt")
-        
-        torch.save({
-            "explorer_optimizer": self.explorer_optimizer.state_dict(),
-            "wm_optimizer": self.wm_optimizer.state_dict(),
-            "explorer_scheduler": self.explorer_scheduler.state_dict(),
-            "wm_scheduler": self.wm_scheduler.state_dict(),
-            "global_step": self.global_step,
-            "episode_count": self.episode_count,
-            "iteration": iteration,
-        }, checkpoint_dir / "optimizer.pt")
-        
-        logger.info(f"Checkpoint saved to {checkpoint_dir}")
-    
-    def load_checkpoint(self, checkpoint_dir: str) -> int:
-        """Load training checkpoint."""
-        checkpoint_path = Path(checkpoint_dir)
-        
-        explorer_path = checkpoint_path / "explorer.pt"
-        if explorer_path.exists():
-            self.explorer.load_state_dict(torch.load(explorer_path))
-        
-        wm_path = checkpoint_path / "world_model.pt"
-        if wm_path.exists():
-            self.world_model.load_state_dict(torch.load(wm_path), strict=False)
-        
-        opt_path = checkpoint_path / "optimizer.pt"
-        if opt_path.exists():
-            checkpoint = torch.load(opt_path)
-            self.explorer_optimizer.load_state_dict(checkpoint["explorer_optimizer"])
-            self.wm_optimizer.load_state_dict(checkpoint["wm_optimizer"])
-            self.explorer_scheduler.load_state_dict(checkpoint["explorer_scheduler"])
-            self.wm_scheduler.load_state_dict(checkpoint["wm_scheduler"])
-            self.global_step = checkpoint["global_step"]
-            self.episode_count = checkpoint["episode_count"]
-            return checkpoint.get("iteration", 0)
-        
-        return 0
+        for iteration in iterator:
+            # 1. Collect Data (Explorer interacts with Env)
+            transitions = self.collect_episode()
+            batch = self._build_ppo_batch(transitions)
+            
+            # 2. Update World Model
+            wm_metrics = {}
+            for _ in range(self.wm_updates_per_iter):
+                m = self.train_step_wm(batch)
+                wm_metrics.update(m)
+            
+            # 3. Update Explorer
+            exp_metrics = {}
+            for _ in range(self.explorer_updates_per_iter):
+                m = self.train_step_explorer(batch)
+                exp_metrics.update(m)
+            
+            # Log metrics
+            if self._is_main_process():
+                self.metrics["wm_loss"].append(wm_metrics.get("wm_loss", 0))
+                self.metrics["policy_loss"].append(exp_metrics.get("policy_loss", 0))
+                self.metrics["episode_reward"].append(np.sum([t["reward"] for t in transitions]))
+                
+                if iteration % self.config.log_every == 0:
+                    logger.info(f"Iter {iteration}: WM Loss={np.mean(self.metrics['wm_loss']):.4f}, "
+                                f"Exp Reward={np.mean(self.metrics['episode_reward']):.4f}")
 
 
 def main():
@@ -878,155 +804,93 @@ def main():
     # Load RL config
     rl_config = load_rl_config(args.rl_config)
     
-    # Setup logging from config (must be done early)
+    # Setup logging
     setup_logging_from_config(rl_config)
     
-    # Apply overrides
-    if args.model_config:
-        rl_config.model.config_file = args.model_config
-    if args.total_iterations is not None:
-        rl_config.adversarial.total_iterations = args.total_iterations
-    if args.output_dir is not None:
-        rl_config.adversarial.output_dir = args.output_dir
-    if args.sequential_training is not None:
-        rl_config.training.sequential_training = args.sequential_training
-    if args.device is not None:
-        rl_config.device = args.device
-    if args.debug is not None:
-        rl_config.debug = args.debug
-    
-    # Create accelerator for DDP if requested
+    # DDP setup
     accelerator = None
     if args.use_ddp:
         accelerator = create_accelerator(mixed_precision="no")
         device = str(accelerator.device)
-        accelerator.print("=" * 70)
-        accelerator.print("Adversarial Training (Phase 3) - DDP Mode")
-        accelerator.print(f"Number of processes: {accelerator.num_processes}")
-        accelerator.print("=" * 70)
     else:
-        device = rl_config.get("device", "cuda")
-        logger.info("=" * 70)
-        logger.info("Adversarial Training (Phase 3)")
-        logger.info("=" * 70)
+        device = rl_config.get("device", "cuda:0")
+        if device == "cuda": device = "cuda:0"
     
     debug = rl_config.get("debug", False)
+    model_config_file = rl_config.get("model", {}).get("config_file", "/mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml")
     
-    # Load model config
-    model_config_file = rl_config.get("model", {}).get(
-        "config_file",
-        "/mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml"
-    )
-    
-    # Get LoRA config
+    # Load Teacher (World Model)
     lora_config = get_lora_config_from_dict(rl_config)
+    teacher_lora_config = copy.deepcopy(lora_config)
+    teacher_lora_config.target_modules = ["q_proj", "v_proj"]
     
-    # Load teacher policy
     if accelerator is None or accelerator.is_main_process:
-        logger.info(f"Loading teacher policy from: {args.teacher_checkpoint}")
+        logger.info(f"Loading teacher (WM) from: {args.teacher_checkpoint}")
+        
     teacher_policy, policy_config, model_config = load_f1_policy(
         config_file=model_config_file,
         device=device,
         debug=debug,
-        lora_config=lora_config,
+        lora_config=teacher_lora_config,
         checkpoint_path=args.teacher_checkpoint,
     )
     
-    # Create environment
+    # Load Student (Explorer)
+    # Use full LoRA config for explorer
+    if accelerator is None or accelerator.is_main_process:
+        logger.info(f"Loading student (Explorer) from: {args.student_checkpoint}")
+        
+    student_policy, _, _ = load_f1_policy(
+        config_file=model_config_file,
+        device=device,
+        debug=debug,
+        lora_config=lora_config,
+        checkpoint_path=args.student_checkpoint, # Load from Phase 2 checkpoint
+    )
+    
+    # Wrap WM
+    world_model = WorldModelWrapper(teacher_policy, policy_config, device)
+    world_model.unfreeze_wm_params()
+    
+    # Create Env
     from rl.f1_rl_env import F1RLEnv
     
     env_config = get_environment_config(rl_config)
-    train_config = get_training_config(rl_config)
     
-    # Get GPU ID for render_device
+    # Get GPU ID
     local_gpu_id = 0
     if accelerator is not None:
-        local_process_idx = accelerator.local_process_index
-        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        if cuda_visible:
-            visible_gpus = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
-            if local_process_idx < len(visible_gpus):
-                local_gpu_id = visible_gpus[local_process_idx]
-            else:
-                local_gpu_id = local_process_idx
-        else:
-            local_gpu_id = local_process_idx
+        local_gpu_id = accelerator.local_process_index
+        os.environ["EGL_DEVICE_ID"] = str(local_gpu_id)
     
     def make_env():
         return F1RLEnv(
-            task_config={
-                **env_config,
-                "render_device": local_gpu_id,
-            },
-            phase="student",
-            teacher_policy=teacher_policy,
+            task_config={**env_config, "render_device": local_gpu_id},
+            phase="student", # Student phase implies wrist camera usage
+            teacher_policy=None, # No teacher needed for env logic if we compute reward manually
+            history_length=4, # Should match config
+            max_steps=rl_config.training.steps_per_episode,
             device=device,
-            max_steps=train_config.steps_per_episode,
         )
     
     env = make_env()
     
-    # Create explorer
-    adv_config = rl_config.get("adversarial", {})
-    explorer_config = adv_config.get("explorer", {})
-    
-    explorer = ExplorerPolicy(
-        state_dim=train_config.state_dim,
-        action_dim=train_config.action_dim,
-        hidden_dim=explorer_config.get("hidden_dim", 256),
-        image_encoder_dim=explorer_config.get("image_encoder_dim", 512),
-    ).to(device)
-    
-    # Load student checkpoint if provided
-    if args.student_checkpoint:
-        if accelerator is None or accelerator.is_main_process:
-            logger.info(f"Loading student explorer from: {args.student_checkpoint}")
-        explorer_path = Path(args.student_checkpoint) / "explorer.pt"
-        if explorer_path.exists():
-            explorer.load_state_dict(torch.load(explorer_path, map_location=device))
-            if accelerator is None or accelerator.is_main_process:
-                logger.info("Student explorer loaded successfully")
-    
-    # Wrap world model (pass policy_config for memory configuration)
-    world_model = WorldModelWrapper(teacher_policy, policy_config, device)
-    world_model.unfreeze_wm_params()
-    
-    # Sync before creating trainer
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    
-    # Create trainer with accelerator and num_envs
+    # Trainer
     trainer = AdversarialTrainer(
         rl_config=rl_config,
         env=env,
-        explorer=explorer,
+        student_policy=student_policy,
         world_model=world_model,
+        policy_config=policy_config,
         model_config_file=model_config_file,
         device=device,
         accelerator=accelerator,
         num_envs=args.num_envs,
     )
     
-    # Setup multi-env if needed
-    if args.num_envs > 1:
-        trainer.setup_multi_env(make_env)
-    
-    # Resume if specified
-    start_iteration = 0
-    if args.resume:
-        if accelerator is None or accelerator.is_main_process:
-            logger.info(f"Resuming from {args.resume}")
-        start_iteration = trainer.load_checkpoint(args.resume)
-    
     # Train
-    total_iterations = adv_config.get("total_iterations", 100000)
-    trainer.train(total_iterations, start_iteration=start_iteration)
-    
-    # Cleanup
-    env.close()
-    if trainer.env_collector is not None:
-        trainer.env_collector.close()
-
+    total_iterations = rl_config.get("adversarial", {}).get("total_iterations", 10000)
+    trainer.train(total_iterations)
 
 if __name__ == "__main__":
     main()

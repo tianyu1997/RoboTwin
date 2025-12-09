@@ -1,110 +1,149 @@
 #!/bin/bash
-# F1-VLA RL Training Script
-# Usage:
-#   ./train_rl.sh teacher              # Phase 1
-#   ./train_rl.sh student              # Phase 2 (需要先完成 Phase 1)
-#   ./train_rl.sh adversarial          # Phase 3 (需要先完成 Phase 1)
-#   ./train_rl.sh all                  # 串联运行所有阶段
+# =============================================================================
+# F1-VLA RL Training Launcher
+# Supports single-GPU and multi-GPU distributed training
+# =============================================================================
 
 set -e
 
+# Default CUDA devices if not set
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3}
+
+# =============================================================================
+# Suppress verbose warnings for cleaner output
+# =============================================================================
+# Suppress HuggingFace tokenizers parallelism warning (safe to disable in subprocess)
+export TOKENIZERS_PARALLELISM=false
+# Suppress imageio ffmpeg warnings
+export IMAGEIO_FFMPEG_EXE_LOGGING=quiet
+# Filter Python warnings
+export PYTHONWARNINGS="ignore::UserWarning,ignore::DeprecationWarning"
+
+# Get script directory and project paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RL_DIR="$(dirname "$SCRIPT_DIR")"
 ROBOTWIN_DIR="$(dirname "$RL_DIR")"
+F1_VLA_DIR="$(dirname "$ROBOTWIN_DIR")"
+
+# Activate conda environment
+source /home/user/miniconda3/etc/profile.d/conda.sh
+conda activate f1
+
+# Change to RoboTwin directory (required for relative paths in environment)
 cd "$ROBOTWIN_DIR"
 
-# 配置
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
-export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-"7.0;7.5;8.0;8.6;8.9;9.0"}
-export CUROBO_LOG_LEVEL=${CUROBO_LOG_LEVEL:-"ERROR"}
-export PYTHONWARNINGS="ignore::UserWarning,ignore::DeprecationWarning"
-export MPLBACKEND=${MPLBACKEND:-"Agg"}
-CONDA_ENV=${CONDA_ENV:-f1}
-OUTPUT_BASE=${OUTPUT_BASE:-"./outputs"}
+# Default values
+PHASE="${1:-teacher}"
+NUM_GPUS="${NUM_GPUS:-3}"
+NUM_ENVS="${NUM_ENVS:-1}"  # Environments per GPU
 
-# 过滤函数：过滤掉JIT编译等无关消息 (使用行缓冲避免输出阻塞)
-filter_output() {
-    stdbuf -oL -eL grep -v -E "(kinematics_fused_cu not found|geom_cu binary not found|tensor_step_cu not found|lbfgs_step_cu not found|line_search_cu not found|JIT compiling|jit compiling|TORCH_CUDA_ARCH_LIST|pkg_resources is deprecated|UserWarning)" || true
-}
+# Shift processed arguments
+shift 1 2>/dev/null || true
+EXTRA_ARGS="$@"
 
-# 激活 conda 环境
-if command -v conda &> /dev/null; then
-    eval "$(conda shell.bash hook)"
-    conda activate "$CONDA_ENV" 2>/dev/null || echo "Warning: conda env '$CONDA_ENV' not found"
-fi
+# Print banner
+echo "=============================================="
+echo "F1-VLA RL Training"
+echo "=============================================="
+echo "Phase:          $PHASE"
+echo "Num GPUs:       $NUM_GPUS"
+echo "Envs per GPU:   $NUM_ENVS"
+echo "Working Dir:    $ROBOTWIN_DIR"
+echo "Extra args:     $EXTRA_ARGS"
+echo ""
 
-# 训练参数
-TEACHER_DIR="$OUTPUT_BASE/teacher_rl"
-STUDENT_DIR="$OUTPUT_BASE/student_rl"
-ADVERSARIAL_DIR="$OUTPUT_BASE/adversarial_rl"
-
-run_teacher() {
-    echo "========== Phase 1: Teacher Training =========="
-    echo "Note: First run may take 2-3 minutes for CUDA JIT compilation..."
-    # Run with unbuffered Python output and filter noisy JIT/compiler messages
-    python -u "$SCRIPT_DIR/train_teacher_rl.py" "$@" 2>&1 | filter_output
-    rc=${PIPESTATUS[0]}
-    if [ "$rc" -ne 0 ]; then
-        return $rc
-    fi
-}
-
-run_student() {
-    local checkpoint="${1:-$TEACHER_DIR/checkpoint-latest}"
-    shift 2>/dev/null || true
-    echo "========== Phase 2: Student Training =========="
-    python -u "$SCRIPT_DIR/train_rl.py" --phase student \
-        --teacher_checkpoint "$checkpoint" \
-        --output_dir "$STUDENT_DIR" "$@" 2>&1 | filter_output
-    rc=${PIPESTATUS[0]}
-    if [ "$rc" -ne 0 ]; then
-        return $rc
-    fi
-}
-
-run_adversarial() {
-    local teacher_ckpt="${1:-$TEACHER_DIR/checkpoint-latest}"
-    local student_ckpt="${2:-}"
-    shift 2 2>/dev/null || true
-    echo "========== Phase 3: Adversarial Training =========="
-    cmd="python $SCRIPT_DIR/train_rl.py --phase adversarial --teacher_checkpoint $teacher_ckpt --output_dir $ADVERSARIAL_DIR"
-    [[ -n "$student_ckpt" ]] && cmd="$cmd --student_checkpoint $student_ckpt"
-    # Run and filter output
-    eval "$cmd" 2>&1 | filter_output
-    rc=${PIPESTATUS[0]}
-    if [ "$rc" -ne 0 ]; then
-        return $rc
-    fi
-}
-
-run_all() {
-    run_teacher
-    run_student "$TEACHER_DIR/checkpoint-latest"
-    run_adversarial "$TEACHER_DIR/checkpoint-latest" "$STUDENT_DIR/checkpoint-latest"
-}
-
-# 主入口
-case "${1:-}" in
-    teacher|1)
-        shift; run_teacher "$@" ;;
-    student|2)
-        shift; run_student "$@" ;;
-    adversarial|3)
-        shift; run_adversarial "$@" ;;
-    all)
-        shift; run_all "$@" ;;
+# Select training script based on phase
+case "$PHASE" in
+    teacher|phase1|wm)
+        SCRIPT="$SCRIPT_DIR/train_teacher_rl.py"
+        PHASE_NAME="Teacher/World Model (Phase 1)"
+        ;;
+    student|phase2|explorer)
+        SCRIPT="$SCRIPT_DIR/train_student_rl.py"
+        PHASE_NAME="Student/Explorer (Phase 2)"
+        
+        # Check if teacher_path is provided, if not use default
+        if [[ "$EXTRA_ARGS" != *"--teacher_path"* ]]; then
+            DEFAULT_TEACHER="/mnt/data2/ty/F1-VLA/RoboTwin/outputs/teacher_rl/checkpoint-memory"
+            echo "[INFO] No teacher_path provided. Using default: $DEFAULT_TEACHER"
+            EXTRA_ARGS="$EXTRA_ARGS --teacher_path $DEFAULT_TEACHER"
+        fi
+        ;;
+    adversarial|phase3|adv)
+        SCRIPT="$SCRIPT_DIR/train_adversarial_rl.py"
+        PHASE_NAME="Adversarial (Phase 3)"
+        ;;
     *)
-        echo "Usage: $0 {teacher|student|adversarial|all} [options]"
+        echo "Unknown phase: $PHASE"
+        echo ""
+        echo "Usage: $0 <phase> [extra_args...]"
         echo ""
         echo "Phases:"
-        echo "  teacher (1)      - Train world model with random exploration"
-        echo "  student (2)      - Train policy with PPO"
-        echo "  adversarial (3)  - Adversarial WM vs Explorer training"
-        echo "  all              - Run all phases sequentially"
+        echo "  teacher     Phase 1: Train World Model (supervised learning)"
+        echo "  student     Phase 2: Train Student Policy (exploration)"
+        echo "  adversarial Phase 3: Adversarial WM vs Explorer training"
         echo ""
-        echo "Environment variables:"
-        echo "  CUDA_VISIBLE_DEVICES  - GPU to use (default: 0)"
-        echo "  CONDA_ENV             - Conda environment (default: f1)"
-        echo "  OUTPUT_BASE           - Output directory base (default: ./outputs)"
-        exit 1 ;;
+        echo "Examples:"
+        echo "  $0 teacher"
+        echo "  $0 teacher --num_episodes 500"
+        echo "  $0 student --teacher_path ./outputs/teacher_rl/checkpoint-100"
+        exit 1
+        ;;
 esac
+
+echo "Phase:          $PHASE_NAME"
+echo "Training script: $SCRIPT"
+echo "=============================================="
+echo ""
+
+# Setup logging
+LOG_DIR="$ROBOTWIN_DIR/logs"
+mkdir -p "$LOG_DIR"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LAUNCHER_LOG="$LOG_DIR/launcher_${TIMESTAMP}.log"
+
+# Create symlink to latest log
+ln -sf "$LAUNCHER_LOG" "$F1_VLA_DIR/latest_launcher.log"
+echo "Created symlink: $F1_VLA_DIR/latest_launcher.log -> $LAUNCHER_LOG"
+
+echo "Redirecting output to: $LAUNCHER_LOG"
+echo "Running in background (detached)..."
+
+if [ "$NUM_GPUS" -gt 1 ]; then
+    # Multi-GPU training with HuggingFace Accelerate
+    echo "[INFO] Launching distributed training with $NUM_GPUS GPUs..."
+    
+    # Create default accelerate config if not exists
+    ACCELERATE_CONFIG_DIR="$HOME/.cache/huggingface/accelerate"
+    if [ ! -f "$ACCELERATE_CONFIG_DIR/default_config.yaml" ]; then
+        echo "[INFO] Creating default accelerate config..."
+        mkdir -p "$ACCELERATE_CONFIG_DIR"
+        cat > "$ACCELERATE_CONFIG_DIR/default_config.yaml" << EOF
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+mixed_precision: 'no'
+num_machines: 1
+num_processes: $NUM_GPUS
+use_cpu: false
+EOF
+    fi
+    
+    # Launch with accelerate
+    nohup accelerate launch \
+        --num_processes=$NUM_GPUS \
+        --multi_gpu \
+        "$SCRIPT" \
+        --use_ddp \
+        --num_envs=$NUM_ENVS \
+        $EXTRA_ARGS > "$LAUNCHER_LOG" 2>&1 &
+else
+    # Single GPU training
+    echo "[INFO] Launching single GPU training..."
+    nohup python "$SCRIPT" \
+        --num_envs=$NUM_ENVS \
+        $EXTRA_ARGS > "$LAUNCHER_LOG" 2>&1 &
+fi
+
+PID=$!
+echo "Training started with PID: $PID"
+echo "You can monitor progress with: tail -f $LAUNCHER_LOG"

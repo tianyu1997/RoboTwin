@@ -77,17 +77,22 @@ training:
   action_dim: 32
   state_dim: 32
   n_pred_img_steps: 1
-  save_every: 1000
+  save_every: 200
   log_every: 10
-  video_save_every: 100
-  sample_save_every: 100
+  video_save_every: 1
+  sample_save_every: 1
+  
+  # Memory/Sequential training (BPTT)
+  sequential_training: true    # Enable sequential batch training
+  bptt_length: 8               # Truncated BPTT sequence length
+  memory_backprop: true        # Enable gradient flow through memory GRU
 
 # Environment configuration
 environment:
   task_name: "random_exploration"
   control_mode: "delta_qpos"
   single_arm: true
-  scene_reset_interval: 10
+  scene_reset_interval: 50     # Reuse scene for N episodes (faster)
   embodiment: ["franka-panda"]
   domain_randomization:
     random_appearance: false
@@ -97,8 +102,8 @@ environment:
 
 # Logging configuration
 logging:
-  console_level: "WARNING"  # Only show warnings+ in console
-  file_level: "DEBUG"       # Full debug in log file
+  console_level: "INFO"         # INFO for progress, WARNING for clean output
+  file_level: "CRITICAL"        # Reduce log file size
   enable_file_logging: true
 
 # Phase-specific configs
@@ -147,6 +152,12 @@ bash ./RoboTwin/rl/training/train.sh teacher 1 1 --num_episodes 1000
 # Multi-GPU (4 GPUs, 2 envs per GPU)
 CUDA_VISIBLE_DEVICES=0,1,2,3 bash ./RoboTwin/rl/training/train.sh teacher 4 2 --num_episodes 10000
 
+# Resume from checkpoint (auto-find latest)
+bash ./RoboTwin/rl/training/train.sh teacher 4 2 --auto_resume
+
+# Resume from specific checkpoint
+bash ./RoboTwin/rl/training/train.sh teacher 4 2 --resume ./outputs/teacher_rl/checkpoint-500
+
 # Arguments:
 #   $1: phase (teacher|student|adversarial)
 #   $2: num_gpus (default: 1)
@@ -167,11 +178,61 @@ accelerate launch --num_processes=4 \
     -m rl.training.train_teacher_rl \
     --num_envs 2 \
     --num_episodes 10000
+
+# Auto-resume from latest checkpoint
+python -m rl.training.train_teacher_rl --auto_resume
+
+# Resume from specific checkpoint
+python -m rl.training.train_teacher_rl --resume ./outputs/teacher_rl/checkpoint-500
+```
+
+### Phase 2 & 3 Training
+
+```bash
+# Phase 2: Student (requires teacher checkpoint)
+bash ./RoboTwin/rl/training/train.sh student 4 2 \
+    --teacher_path ./outputs/teacher_rl/checkpoint-5000 \
+    --num_episodes 5000
+
+# Phase 3: Adversarial
+bash ./RoboTwin/rl/training/train.sh adversarial 4 2 \
+    --teacher_checkpoint ./outputs/teacher_rl/checkpoint-5000 \
+    --student_checkpoint ./outputs/student_rl/checkpoint-2000 \
+    --total_iterations 100000
 ```
 
 ## 🔧 Key Components
 
-### 1. Memory State Management (⚠️ CRITICAL)
+### 1. Sequential Training with BPTT (Truncated Backpropagation Through Time)
+
+F1-VLA has a GRU-based memory that benefits from sequential training:
+
+```yaml
+# In rl_config.yaml
+training:
+  sequential_training: true   # Enable sequential batch training
+  bptt_length: 8              # Sequence length for BPTT (4-16 recommended)
+  memory_backprop: true       # Enable gradient flow through memory GRU
+```
+
+**How it works:**
+```
+序列1                序列2                序列3
+[t1→t2→t3→t4]       [t5→t6→t7→t8]       [t9→t10→t11→t12]
+    ↓梯度流             ↓梯度流               ↓梯度流
+    ↓                   ↓                     ↓
+  detach ←───────── detach ←───────── detach
+```
+
+- **Within sequence**: Gradients flow through memory GRU (BPTT)
+- **Between sequences**: Memory state is detached (prevents infinite graph growth)
+- This allows the GRU to learn better temporal encodings
+
+**When to use:**
+- `sequential_training: true` + `memory_backprop: true`: Best for memory learning
+- `sequential_training: false`: Random batch sampling (faster, but memory doesn't improve)
+
+### 2. Memory State Management (⚠️ CRITICAL)
 
 F1-VLA has a GRU-based memory that requires proper state propagation:
 
@@ -196,7 +257,37 @@ if memory_state is None:
 - Memory state **MUST NOT** be None during training
 - The training script will raise an error if memory_state becomes None
 
-### 2. Multi-GPU Distribution
+### 3. Checkpoint Save/Load/Resume
+
+All three phases support unified checkpoint management:
+
+```bash
+# Auto-resume from latest checkpoint
+python train_teacher_rl.py --auto_resume
+python train_student_rl.py --teacher_path ./... --auto_resume
+python train_adversarial_rl.py --teacher_checkpoint ./... --auto_resume
+
+# Resume from specific checkpoint
+python train_teacher_rl.py --resume ./outputs/teacher_rl/checkpoint-500
+```
+
+**Checkpoint structure:**
+```
+checkpoint-{step}/
+├── model.pt              # Model weights (state_dict)
+├── peft_adapter/         # PEFT adapter weights (if applicable)
+├── training_state.pt     # Optimizer, scheduler, metrics, config
+└── metrics.pt            # Recent training metrics snapshot
+```
+
+**Saved training state includes:**
+- Optimizer state
+- Scheduler state
+- Training step/episode counter
+- Training config (sequential_training, bptt_length, memory_backprop, etc.)
+- Metrics history
+
+### 4. Multi-GPU Distribution
 
 SAPIEN uses Vulkan rendering which requires explicit GPU assignment:
 

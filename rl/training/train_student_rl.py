@@ -56,12 +56,25 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from collections import deque
 import copy
+from tqdm import tqdm
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import OmegaConf
+
+# Set CUDA device immediately to avoid NCCL warnings/hangs
+if torch.cuda.is_available():
+    # Try to get local rank from env vars (LOCAL_RANK is standard for torchrun/accelerate)
+    local_rank_env = os.environ.get("LOCAL_RANK")
+    if local_rank_env is not None:
+        try:
+            device_id = int(local_rank_env)
+            torch.cuda.set_device(device_id)
+            # print(f"Process {os.getpid()} set torch cuda device to {device_id}") 
+        except Exception as e:
+            print(f"Failed to set device: {e}")
 
 # Import shared utilities
 from rl.training.rl_training_common import (
@@ -138,6 +151,8 @@ def parse_args():
     # Resume training
     parser.add_argument("--resume", type=str, default=None,
                        help="Path to checkpoint directory to resume training from")
+    parser.add_argument("--auto_resume", action="store_true", default=False,
+                       help="Automatically resume from latest checkpoint in output_dir")
     
     # DDP and multi-environment options
     parser.add_argument("--num_envs", type=int, default=1,
@@ -166,7 +181,7 @@ class StudentTrainer(BaseRLTrainer):
         teacher_policy: nn.Module,
         policy_config,
         rl_config: OmegaConf,
-        model_config_file: str,
+        model_config: Union[str, DictConfig],
         device: str = "cuda",
         accelerator: Optional[AcceleratorWrapper] = None,
         num_envs: int = 1,
@@ -176,9 +191,13 @@ class StudentTrainer(BaseRLTrainer):
         self.num_envs = num_envs
         
         # Load model config to get n_obs_img_steps and stride
-        import yaml
-        with open(model_config_file, 'r') as f:
-            model_cfg = yaml.safe_load(f)
+        if isinstance(model_config, (str, Path)):
+            import yaml
+            with open(model_config, 'r') as f:
+                model_cfg = yaml.safe_load(f)
+        else:
+            # Assume DictConfig or dict
+            model_cfg = OmegaConf.to_container(model_config, resolve=True)
         
         train_datasets = model_cfg.get('dataset', {}).get('train_dir', {})
         if not train_datasets:
@@ -202,6 +221,7 @@ class StudentTrainer(BaseRLTrainer):
             config=train_config,
             output_dir=output_dir,
             device=device,
+            accelerator=accelerator,  # Pass accelerator to base class
         )
         
         self.student_policy = student_policy
@@ -214,9 +234,10 @@ class StudentTrainer(BaseRLTrainer):
         print(f"  n_pred_img_steps: {self.n_pred_img_steps}")
         print(f"  history_length: {train_config.history_length}")
         
-        # Freeze teacher
-        self.teacher_policy.eval()
-        for param in self.teacher_policy.parameters():
+        # Freeze teacher (unwrap DDP model first)
+        teacher_policy_unwrapped = self.accelerator.unwrap_model(self.teacher_policy) if self.accelerator else self.teacher_policy
+        teacher_policy_unwrapped.eval()
+        for param in teacher_policy_unwrapped.parameters():
             param.requires_grad = False
         
         # World model image steps (for compatibility)
@@ -228,21 +249,30 @@ class StudentTrainer(BaseRLTrainer):
         self.memory_divergence_weight = rewards_config.get("memory_divergence_weight", 0.5)
         self.wm_uncertainty_weight = rewards_config.get("wm_uncertainty_weight", 0.5)
         
-        # PPO parameters
+        # PPO parameters - adjusted for stability
         ppo_config = student_config.get("ppo", {})
-        self.clip_epsilon = ppo_config.get("clip_epsilon", 0.2)
-        self.entropy_coef = ppo_config.get("entropy_coef", 0.01)
+        self.ppo_config = ppo_config  # Store for later use
+        self.clip_epsilon = ppo_config.get("clip_epsilon", 0.1)  # Reduced from 0.2 for stability
+        self.entropy_coef = ppo_config.get("entropy_coef", 0.02)  # Increased from 0.01 for more exploration
         self.value_loss_coef = ppo_config.get("value_loss_coef", 0.5)
         self.gamma = ppo_config.get("gamma", 0.99)
         self.gae_lambda = ppo_config.get("gae_lambda", 0.95)
         
+        # Value head for PPO - MUST be initialized before optimizer
+        # state_proj outputs [B, proj_width] where proj_width=1024 typically
+        proj_width = policy_config.proj_width if hasattr(policy_config, 'proj_width') else 1024
+        self.value_head = nn.Linear(proj_width, 1).to(device)
+        self.log_std = nn.Parameter(torch.zeros(train_config.action_dim, device=device))
+        
         # Setup student policy for training - train action expert only
-        self.student_policy.train()
+        # Note: unwrap DDP model for training setup, but use wrapped model for forward
+        student_policy_unwrapped = self.accelerator.unwrap_model(self.student_policy) if self.accelerator else self.student_policy
+        student_policy_unwrapped.train()
         
         # Set gradient flags: train action expert, freeze world model
         print("\nConfiguring student training: Action Expert only")
         set_policy_requires_grad(
-            self.student_policy,
+            student_policy_unwrapped,
             freeze_vision_encoder=True,
             freeze_gen_expert=True,  # Freeze world model (use teacher's WM)
             train_act_expert_only=True,  # Only train action prediction
@@ -253,8 +283,15 @@ class StudentTrainer(BaseRLTrainer):
         trainable, total = count_trainable_params(self.student_policy)
         self._print(f"Student trainable parameters: {trainable:,} / {total:,}")
         
-        self.optimizer = setup_optimizer(
-            self.student_policy,
+        # Collect all trainable parameters: student_policy + value_head + log_std
+        param_groups = [
+            {'params': self.student_policy.parameters()},
+            {'params': self.value_head.parameters()},
+            {'params': [self.log_std]},  # log_std is a single parameter
+        ]
+        
+        self.optimizer = torch.optim.AdamW(
+            param_groups,
             lr=train_config.learning_rate,
             weight_decay=train_config.weight_decay,
         )
@@ -305,10 +342,6 @@ class StudentTrainer(BaseRLTrainer):
         # Track previous divergence for reward computation
         self.prev_memory_divergence: float = 0.0
         
-        # Value head for PPO
-        self.value_head = nn.Linear(policy_config.state_dim, 1).to(device)
-        self.log_std = nn.Parameter(torch.zeros(train_config.action_dim, device=device))
-        
         # Additional metrics
         self.metrics.update({
             "policy_loss": deque(maxlen=100),
@@ -318,6 +351,38 @@ class StudentTrainer(BaseRLTrainer):
             "wm_uncertainty": deque(maxlen=100),
             "episode_reward": deque(maxlen=100),
         })
+    
+    def load_checkpoint(self, checkpoint_dir: str) -> int:
+        """
+        Load checkpoint with Student-specific state (value_head, log_std).
+        
+        Extends base class to also restore PPO-specific components.
+        """
+        # Call base class to load model, optimizer, scheduler
+        start_step = super().load_checkpoint(checkpoint_dir)
+        
+        # Load Student-specific state
+        checkpoint_path = Path(checkpoint_dir)
+        trainer_state_path = checkpoint_path / "trainer_state.pt"
+        
+        if trainer_state_path.exists():
+            try:
+                state = torch.load(trainer_state_path, map_location=self.device)
+                
+                # Restore value head
+                if "value_head" in state:
+                    self.value_head.load_state_dict(state["value_head"])
+                    logger.info("Loaded value_head state")
+                
+                # Restore log_std
+                if "log_std" in state:
+                    self.log_std.data = state["log_std"].to(self.device)
+                    logger.info("Loaded log_std state")
+                    
+            except Exception as e:
+                logger.warning(f"Could not load Student-specific state: {e}")
+        
+        return start_step
     
     def _init_memory_state(self, batch_size: int) -> torch.Tensor:
         """Initialize memory state to zeros for first frame.
@@ -354,9 +419,16 @@ class StudentTrainer(BaseRLTrainer):
         from rl.f1_rl_env import StudentEnv
         
         # Get GPU ID for this process
+        # IMPORTANT: When CUDA_VISIBLE_DEVICES is set, GPUs are remapped to 0,1,2,...
+        # So we should use local_process_index directly as the render device
         local_gpu_id = 0
+        render_device_id = 0
+        
         if self.accelerator is not None:
             local_process_idx = self.accelerator.local_process_index
+            render_device_id = local_process_idx
+            
+            # Calculate physical ID for Vulkan
             cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
             if cuda_visible:
                 visible_gpus = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
@@ -366,18 +438,42 @@ class StudentTrainer(BaseRLTrainer):
                     local_gpu_id = local_process_idx
             else:
                 local_gpu_id = local_process_idx
+            
+            # Set RL_MAIN_PROCESS to control logging in _base_task.py
+            os.environ["RL_MAIN_PROCESS"] = "1" if self._is_main_process() else "0"
+            
+            # Set EGL device for SAPIEN rendering (use remapped ID)
+            os.environ["EGL_DEVICE_ID"] = str(local_gpu_id)
+            os.environ["VK_DEVICE_INDEX"] = str(local_gpu_id)
+        
+        # Get environment parameters (same as teacher)
+        single_arm = self.env_config.get("single_arm", False)
+        scene_reset_interval = self.env_config.get("scene_reset_interval", 1)
+        randomize_robot_init = self.env_config.get("randomize_robot_init", False)
+        need_planner = self.env_config.get("need_planner", False)
+        need_topp = self.env_config.get("need_topp", False)
+        
+        # Unwrap teacher policy for environment (environment calls model directly)
+        teacher_policy_unwrapped = self.accelerator.unwrap_model(self.teacher_policy) if self.accelerator else self.teacher_policy
         
         def make_env():
+            # Capture local_gpu_id in closure
+            gpu_id = render_device_id
             return StudentEnv(
                 task_config={
                     **self.env_config,
-                    "render_device": local_gpu_id,
+                    "need_planner": need_planner,
+                    "need_topp": need_topp,
+                    "render_device": gpu_id,
                 },
-                teacher_policy=self.teacher_policy,
+                teacher_policy=teacher_policy_unwrapped,
                 history_length=self.config.history_length,
                 max_steps=self.config.steps_per_episode,
                 device=self.device,
                 action_scale=self.config.action_scale,
+                single_arm=single_arm,
+                scene_reset_interval=scene_reset_interval,
+                randomize_robot_init=randomize_robot_init,
             )
         
         # Single env for compatibility
@@ -388,15 +484,18 @@ class StudentTrainer(BaseRLTrainer):
             self.env_collector = ParallelEnvCollector(
                 env_fn=make_env,
                 num_envs=self.num_envs,
+                is_main_process=self._is_main_process(),
             )
             self.env_collector.initialize()
             self._print(f"Parallel env collector setup: {self.num_envs} envs")
         
         self._print(f"Student environment setup complete")
     
-    def collect_episode(self) -> List[Dict[str, Any]]:
+    def collect_episode(self, use_tqdm: bool = False) -> List[Dict[str, Any]]:
         """Collect one episode using student policy."""
+        logger.debug(f"[collect_episode] Starting reset...")
         obs, info = self.env.reset()
+        logger.debug(f"[collect_episode] Reset complete, starting rollout")
         transitions = []
         
         # Reset memory states (will be initialized to zeros on first step)
@@ -406,6 +505,11 @@ class StudentTrainer(BaseRLTrainer):
         
         done = False
         step = 0
+        
+        # Use tqdm for steps if requested
+        pbar = None
+        if use_tqdm:
+            pbar = tqdm(total=self.config.steps_per_episode, desc="Episode Steps", leave=False)
         
         while not done:
             # Build batch for student policy
@@ -421,7 +525,7 @@ class StudentTrainer(BaseRLTrainer):
             
             # Get action from student policy (also updates student memory)
             with torch.no_grad():
-                actions, log_probs, values, student_memory_out = self._forward_student(batch)
+                actions, log_probs, values, student_memory_out, wm_logits = self._forward_student(batch)
             
             # Update student memory state
             if student_memory_out is not None:
@@ -439,8 +543,25 @@ class StudentTrainer(BaseRLTrainer):
             next_obs, env_reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             
-            # Compute custom reward
-            reward, reward_info = self._compute_custom_reward(obs, batch)
+            # Compute custom reward (pass wm_logits from student model)
+            reward, reward_info = self._compute_custom_reward(obs, batch, wm_logits=wm_logits)
+            
+            # Update progress bar with metrics
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix({
+                    "rew": f"{reward:.2f}",
+                    "mem_div": f"{reward_info.get('memory_divergence_abs', 0):.2f}"
+                })
+            
+            # Log reward components every 50 steps to reduce verbosity
+            if step % 50 == 0 and not use_tqdm:
+                logger.debug(f"[collect_episode] Step {step} - Reward components:")
+                logger.debug(f"  Env reward: {env_reward:.4f}")
+                logger.debug(f"  Custom reward: {reward:.4f}")
+                logger.debug(f"  Memory div reward: {reward_info.get('memory_divergence', 0):.4f}")
+                logger.debug(f"  Memory div abs: {reward_info.get('memory_divergence_abs', 0):.4f}")
+                logger.debug(f"  WM uncertainty: {reward_info.get('wm_uncertainty', 0):.4f}")
             
             transitions.append({
                 "obs": obs,
@@ -455,6 +576,9 @@ class StudentTrainer(BaseRLTrainer):
             
             obs = next_obs
             step += 1
+        
+        if pbar:
+            pbar.close()
         
         # Compute advantages using GAE
         self._compute_advantages(transitions)
@@ -504,7 +628,8 @@ class StudentTrainer(BaseRLTrainer):
         self,
         batch: Dict[str, torch.Tensor],
         deterministic: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        actions: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Forward pass through student model.
         
@@ -513,33 +638,102 @@ class StudentTrainer(BaseRLTrainer):
             log_probs: Log probabilities [B]
             values: Value estimates [B]
             memory_state: Updated memory state (or None)
+            wm_logits: World model logits for uncertainty computation (or None)
         """
+        # Unwrap DDP model if needed
+        policy = self.accelerator.unwrap_model(self.student_policy) if self.accelerator else self.student_policy
+        
+        # Access the underlying F1FlowMatching model through PEFT wrapper
+        # PEFT structure: PeftModel -> base_model (LoraModel) -> model (F1_VLA) -> model (F1FlowMatching)
+        if hasattr(policy, 'base_model'):
+            # PEFT wrapped model
+            f1_vla = policy.base_model.model  # F1_VLA
+            f1_flow = f1_vla.model  # F1FlowMatching
+        else:
+            # Direct F1_VLA model
+            f1_vla = policy
+            f1_flow = policy.model
+        
         # Use student model to generate actions
         noise = torch.randn(
-            1, self.policy_config.chunk_size,
+            batch["observation.state"].shape[0], self.policy_config.chunk_size,
             self.policy_config.max_action_dim,
             device=self.device
         )
         
-        # Sample actions from student model
-        # Note: This should return memory_state if the model supports it
-        action_output = self.student_policy.sample_actions_with_world_model(
-            images=[batch.get("observation.images.image1")],
-            image_masks=[batch.get("observation.images.image1_mask", 
-                        torch.ones(1, dtype=torch.bool, device=self.device))],
-            lang_tokens=None,
-            lang_masks=None,
-            state=batch["observation.state"],
-            world_model_input_embs=None,
+        # ===== Prepare world_model_input_embs from image history =====
+        # World Model needs VAE-encoded history images
+        world_model_input_embs = None
+        if "observation.images.image0_history" in batch:
+            world_model_images = batch["observation.images.image0_history"]
+            B, T, C, H, W = world_model_images.shape
+            
+            # VQ-VAE expects 256x256 images
+            if H != 256 or W != 256:
+                world_model_images = world_model_images.reshape(B * T, C, H, W)
+                world_model_images = torch.nn.functional.interpolate(
+                    world_model_images, size=(256, 256), mode='bilinear', align_corners=False
+                )
+                world_model_images = world_model_images.reshape(B, T, C, 256, 256)
+            
+            
+            # Encode through VAE
+            world_model_images_flat = world_model_images.reshape(B * T, C, 256, 256)
+            world_model_indices_list = f1_flow.vae.img_to_idxBl(world_model_images_flat)
+            world_model_input_embs = f1_flow.vae.quantize.idxBl_to_var_input(world_model_indices_list)
+            world_model_input_embs = world_model_input_embs.reshape(B, T, *world_model_input_embs.shape[1:])
+        
+        # Prepare language tokens if needed
+        lang_tokens = None
+        lang_masks = None
+        if "task" in batch:
+            # Use f1_vla's language tokenizer
+            tasks = batch["task"]
+            tasks = [t if t.endswith("\n") else f"{t}\n" for t in tasks]
+            tokenized = f1_vla.language_tokenizer(
+                tasks,
+                padding="max_length",
+                padding_side="right",
+                max_length=f1_vla.config.tokenizer_max_length,
+                return_tensors="pt",
+                truncation=True,
+            )
+            lang_tokens = tokenized["input_ids"].to(device=self.device)
+            lang_masks = tokenized["attention_mask"].to(device=self.device, dtype=torch.bool)
+        
+        # Prepare state with padding
+        state = batch["observation.state"]
+        if state.shape[-1] < self.policy_config.max_state_dim:
+            pad_size = self.policy_config.max_state_dim - state.shape[-1]
+            state = torch.nn.functional.pad(state, (0, pad_size))
+        
+        # Sample actions from F1FlowMatching model
+        # Student uses wrist_rgb as image0 (see _obs_to_batch)
+        # Get image0 and create default mask with matching batch size
+        image0 = batch.get("observation.images.image0")
+        batch_size = image0.shape[0] if image0 is not None else state.shape[0]
+        image0_mask = batch.get("observation.images.image0_mask", 
+                               torch.ones(batch_size, dtype=torch.bool, device=self.device))
+        
+        action_output = f1_flow.sample_actions_with_world_model(
+            images=[image0],
+            image_masks=[image0_mask],
+            lang_tokens=lang_tokens,
+            lang_masks=lang_masks,
+            state=state,
+            world_model_input_embs=world_model_input_embs,
             predict_action_only=True,
             noise=noise,
             action_history=batch.get("action_history"),
             initial_memory_state=batch.get("initial_memory_state"),
         )
         
-        # Handle output format (may be tuple with memory_state)
+        # Handle output format: (action, memory_state, wm_logits)
+        wm_logits = None
         if isinstance(action_output, tuple):
-            action_tensor, memory_state = action_output[0], action_output[1] if len(action_output) > 1 else None
+            action_tensor = action_output[0]
+            memory_state = action_output[1] if len(action_output) > 1 else None
+            wm_logits = action_output[2] if len(action_output) > 2 else None
         else:
             action_tensor = action_output
             memory_state = None
@@ -547,7 +741,11 @@ class StudentTrainer(BaseRLTrainer):
         action_mean = action_tensor[:, 0, :]
         std = torch.exp(self.log_std)
         
-        if deterministic:
+        if actions is not None:
+            # Evaluate provided actions
+            dist = torch.distributions.Normal(action_mean, std)
+            log_probs = dist.log_prob(actions).sum(dim=-1)
+        elif deterministic:
             actions = action_mean
             log_probs = torch.zeros(1, device=self.device)
         else:
@@ -557,16 +755,17 @@ class StudentTrainer(BaseRLTrainer):
         
         actions = torch.clamp(actions, -1.0, 1.0)
         
-        # Value estimate
-        state_emb = self.student_policy.state_proj(batch["observation.state"])
+        # Value estimate - use f1_flow.state_proj
+        state_emb = f1_flow.state_proj(batch["observation.state"])
         values = self.value_head(state_emb).squeeze(-1)
         
-        return actions, log_probs, values, memory_state
+        return actions, log_probs, values, memory_state, wm_logits
     
     def _compute_custom_reward(
         self,
         obs: Dict[str, np.ndarray],
         batch: Dict[str, torch.Tensor],
+        wm_logits: Optional[torch.Tensor] = None,
     ) -> Tuple[float, Dict[str, Any]]:
         """
         Compute custom reward for student to imitate teacher.
@@ -590,13 +789,15 @@ class StudentTrainer(BaseRLTrainer):
             # First frame: initialize to zeros
             teacher_batch["initial_memory_state"] = self._init_memory_state(batch_size=1)
         
-        # Get teacher's world model prediction
+        # Get teacher's world model prediction (unwrap DDP model)
+        teacher_policy = self.accelerator.unwrap_model(self.teacher_policy) if self.accelerator else self.teacher_policy
         with torch.no_grad():
-            wm_output = self.teacher_policy.forward_with_world_model(
+            # Use forward_memory_only instead of forward_with_world_model
+            # forward_with_world_model requires target images which we don't have in RL inference
+            wm_output = teacher_policy.forward_memory_only(
                 teacher_batch,
-                cur_n_obs_img_steps=self.cur_n_obs_img_steps,
-                cur_n_pred_img_steps=self.cur_n_pred_img_steps,
-                train_gen_expert_only=True,
+                use_student_mode=False,  # Teacher mode: head + wrist cameras
+                prev_memory_state=teacher_batch.get("initial_memory_state"),
             )
         
         # Update teacher memory
@@ -612,20 +813,59 @@ class StudentTrainer(BaseRLTrainer):
         memory_divergence_reward = 0.0
         current_divergence = 0.0
         
+        # Debug: log memory state availability
+        if student_memory_t1 is None:
+            logger.debug("Student memory_t1 is None")
+        else:
+            logger.debug(f"Student memory_t1 shape: {student_memory_t1.shape}, mean: {student_memory_t1.mean().item():.4f}, std: {student_memory_t1.std().item():.4f}")
+        
+        if teacher_memory_t1 is None:
+            logger.debug("Teacher memory_t1 is None")
+        else:
+            logger.debug(f"Teacher memory_t1 shape: {teacher_memory_t1.shape}, mean: {teacher_memory_t1.mean().item():.4f}, std: {teacher_memory_t1.std().item():.4f}")
+        
         if student_memory_t1 is not None and teacher_memory_t1 is not None:
             # Compute ||h_student^{t+1} - h_teacher^{t+1}||
             current_divergence = torch.norm(student_memory_t1 - teacher_memory_t1).item()
-            # Negative: reward when divergence decreases
-            memory_divergence_reward = -(current_divergence - self.prev_memory_divergence)
+            
+            # Handle initialization: if prev_divergence is 0 (first step), set reward to 0
+            if self.prev_memory_divergence == 0.0:
+                logger.info(f"[Step {getattr(self, 'global_step', 0)}] First memory divergence measurement: {current_divergence:.4f}, setting reward=0")
+                memory_divergence_reward = 0.0
+            else:
+                # r_mem has two components:
+                # 1. Progress reward: -(current - prev), positive when getting closer
+                # 2. Proximity penalty: penalize being far away
+                progress_reward = -(current_divergence - self.prev_memory_divergence)
+                proximity_penalty = -0.001 * current_divergence  # Penalize absolute distance
+                memory_divergence_reward = progress_reward + proximity_penalty
+                
+                # Log detailed information every 50 steps to reduce verbosity
+                if getattr(self, 'global_step', 0) % 50 == 0:
+                    logger.debug(f"[Step {getattr(self, 'global_step', 0)}] Memory Divergence Details:")
+                    logger.debug(f"  Current divergence: {current_divergence:.6f}")
+                    logger.debug(f"  Previous divergence: {self.prev_memory_divergence:.6f}")
+                    logger.debug(f"  Change (curr-prev): {current_divergence - self.prev_memory_divergence:+.6f}")
+                    logger.debug(f"  Progress reward: {progress_reward:+.6f}")
+                    logger.debug(f"  Proximity penalty: {proximity_penalty:+.6f}")
+                    logger.debug(f"  Total mem_div reward: {memory_divergence_reward:+.6f}")
+        else:
+            logger.warning(f"Cannot compute memory divergence: student={student_memory_t1 is not None}, teacher={teacher_memory_t1 is not None}")
         
-        # Update for next step
+        # Update for next step (for tracking purposes)
         self.prev_memory_divergence = current_divergence
         
         # ===== WM uncertainty (entropy of prediction) =====
-        wm_logits = wm_output.get("wm_logits", torch.zeros(1, device=self.device))
-        wm_probs = F.softmax(wm_logits, dim=-1)
-        wm_entropy = -torch.sum(wm_probs * torch.log(wm_probs + 1e-8), dim=-1)
-        wm_uncertainty = wm_entropy.mean().item()
+        # Use wm_logits from student model's forward pass
+        wm_uncertainty = 0.0
+        if wm_logits is not None and wm_logits.numel() > 0:
+            # wm_logits shape: [B, seq_len, vocab_size]
+            wm_probs = F.softmax(wm_logits, dim=-1)
+            wm_entropy = -torch.sum(wm_probs * torch.log(wm_probs + 1e-8), dim=-1)
+            wm_uncertainty = wm_entropy.mean().item()
+            logger.debug(f"WM uncertainty from student: {wm_uncertainty:.4f}")
+        else:
+            logger.debug("WM logits is None or empty, wm_uncertainty=0")
         
         # ===== Combined reward =====
         reward = (
@@ -637,6 +877,7 @@ class StudentTrainer(BaseRLTrainer):
             "memory_divergence": memory_divergence_reward,
             "memory_divergence_abs": current_divergence,
             "wm_uncertainty": wm_uncertainty,
+            "reward_total": reward,
         }
     
     def _compute_advantages(self, transitions: List[Dict[str, Any]]):
@@ -664,43 +905,96 @@ class StudentTrainer(BaseRLTrainer):
             t["return"] = advantages[i] + values[i]
     
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """Execute one PPO training step."""
-        self.optimizer.zero_grad()
+        """Execute one PPO training step with mini-batching to avoid OOM."""
+        batch_size = batch["observation.state"].shape[0]
+        mini_batch_size = self.config.mini_batch_size
         
-        # Forward pass (ignore memory_state during training)
-        actions, log_probs, values, _ = self._forward_student(batch)
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
+        total_loss = 0.0
+        num_mini_batches = 0
         
-        # PPO loss
-        old_log_probs = batch["old_log_probs"]
-        advantages = batch["advantages"]
-        returns = batch["returns"]
+        # Shuffle indices
+        indices = torch.randperm(batch_size)
         
-        # Policy loss (clipped)
-        ratio = torch.exp(log_probs - old_log_probs)
-        surr1 = ratio * advantages
-        surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * advantages
-        policy_loss = -torch.min(surr1, surr2).mean()
-        
-        # Value loss
-        value_loss = F.mse_loss(values, returns)
-        
-        # Entropy bonus
-        std = torch.exp(self.log_std)
-        entropy = 0.5 * (1 + torch.log(2 * np.pi * std**2)).sum()
-        
-        # Total loss
-        loss = policy_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy
-        
-        # Backward
-        loss.backward()
-        clip_gradients(self.student_policy, max_norm=self.config.max_grad_norm)
-        self.optimizer.step()
+        for start in range(0, batch_size, mini_batch_size):
+            end = min(start + mini_batch_size, batch_size)
+            mb_indices = indices[start:end]
+            
+            # Create mini-batch
+            mb_batch = {
+                "observation.state": batch["observation.state"][mb_indices],
+                "action_history": batch["action_history"][mb_indices],
+                "task": [batch["task"][i] for i in mb_indices.tolist()],
+                "actions": batch["actions"][mb_indices],
+            }
+            if "observation.images.image0_history" in batch:
+                mb_batch["observation.images.image0_history"] = batch["observation.images.image0_history"][mb_indices]
+                mb_batch["observation.images.image0"] = batch["observation.images.image0"][mb_indices]
+                mb_batch["observation.images.image0_mask"] = batch["observation.images.image0_mask"][mb_indices]
+            
+            self.optimizer.zero_grad()
+            
+            # Forward pass (ignore memory_state and wm_logits during training)
+            with torch.amp.autocast('cuda', enabled=False):  # Disable mixed precision for stability
+                _, log_probs, values, _, _ = self._forward_student(mb_batch, actions=mb_batch["actions"])
+            
+            # PPO loss
+            mb_old_log_probs = batch["old_log_probs"][mb_indices]
+            mb_advantages = batch["advantages"][mb_indices]
+            mb_returns = batch["returns"][mb_indices]
+            
+            # Normalize advantages for stability
+            normalize_adv = getattr(self.ppo_config, 'normalize_advantages', True)
+            if normalize_adv and mb_advantages.numel() > 1:
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+            
+            # Policy loss (clipped)
+            ratio = torch.exp(log_probs - mb_old_log_probs)
+            surr1 = ratio * mb_advantages
+            surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * mb_advantages
+            policy_loss = -torch.min(surr1, surr2).mean()
+            
+            # Value loss with optional clipping
+            clip_value = getattr(self.ppo_config, 'clip_value_loss', True)
+            if clip_value:
+                # Get old values from batch
+                mb_old_values = batch["old_values"][mb_indices]
+                values_clipped = mb_old_values + torch.clamp(
+                    values - mb_old_values, -self.clip_epsilon, self.clip_epsilon
+                )
+                value_loss_unclipped = F.mse_loss(values, mb_returns, reduction='none')
+                value_loss_clipped = F.mse_loss(values_clipped, mb_returns, reduction='none')
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
+            else:
+                value_loss = F.mse_loss(values, mb_returns)
+            
+            # Entropy bonus
+            std = torch.exp(self.log_std)
+            entropy = 0.5 * (1 + torch.log(2 * np.pi * std**2)).sum()
+            
+            # Total loss
+            loss = policy_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy
+            
+            # Backward
+            loss.backward()
+            # Use unwrapped model for gradient clipping
+            student_policy_unwrapped = self.accelerator.unwrap_model(self.student_policy) if self.accelerator else self.student_policy
+            clip_gradients(student_policy_unwrapped, max_norm=self.config.max_grad_norm)
+            self.optimizer.step()
+            
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+            total_entropy += entropy.item()
+            total_loss += loss.item()
+            num_mini_batches += 1
         
         return {
-            "policy_loss": policy_loss.item(),
-            "value_loss": value_loss.item(),
-            "entropy": entropy.item(),
-            "total_loss": loss.item(),
+            "policy_loss": total_policy_loss / num_mini_batches,
+            "value_loss": total_value_loss / num_mini_batches,
+            "entropy": total_entropy / num_mini_batches,
+            "total_loss": total_loss / num_mini_batches,
         }
     
     def train(self, start_episode: int = 0):
@@ -713,11 +1007,27 @@ class StudentTrainer(BaseRLTrainer):
         # Setup environment
         self.setup_environment()
         
-        for episode in range(start_episode, num_episodes):
+        # Check if this is the main process
+        is_main_process = (self.accelerator is None) or self.accelerator.is_main_process
+        
+        logger.info(f"[Rank {self.accelerator.local_process_index if self.accelerator else 0}] Starting training loop")
+        
+        # Use tqdm for progress bar on main process
+        episode_iterator = range(start_episode, num_episodes)
+        if is_main_process:
+            episode_iterator = tqdm(episode_iterator, desc="Training Episodes", unit="ep")
+        
+        for episode in episode_iterator:
             self.metrics["episode"] = episode
             
+            if not is_main_process:
+                logger.debug(f"[Rank {self.accelerator.local_process_index}] Episode {episode}: collecting rollout")
+            
             # Collect episode
-            transitions = self.collect_episode()
+            transitions = self.collect_episode(use_tqdm=is_main_process)
+            
+            if not is_main_process:
+                logger.debug(f"[Rank {self.accelerator.local_process_index}] Episode {episode}: collected {len(transitions)} transitions")
             
             # Track episode reward
             episode_reward = sum(t["reward"] for t in transitions)
@@ -725,29 +1035,47 @@ class StudentTrainer(BaseRLTrainer):
             
             # Track reward components
             avg_memory_div = np.mean([t["info"]["memory_divergence"] for t in transitions])
+            avg_memory_div_abs = np.mean([t["info"]["memory_divergence_abs"] for t in transitions])
             avg_wm_unc = np.mean([t["info"]["wm_uncertainty"] for t in transitions])
             self.metrics["memory_divergence"].append(avg_memory_div)
             self.metrics["wm_uncertainty"].append(avg_wm_unc)
+            
+            # Log detailed episode statistics
+            logger.info(f"[Episode {episode}] Completed - Detailed Statistics:")
+            logger.info(f"  Total steps: {len(transitions)}")
+            logger.info(f"  Episode reward: {episode_reward:.4f}")
+            logger.info(f"  Avg memory div reward: {avg_memory_div:.6f}")
+            logger.info(f"  Avg memory div abs: {avg_memory_div_abs:.6f}")
+            logger.info(f"  Avg WM uncertainty: {avg_wm_unc:.6f}")
+            logger.info(f"  Min/Max reward: {min(t['reward'] for t in transitions):.4f} / {max(t['reward'] for t in transitions):.4f}")
             
             # Build PPO batch
             batch = self._build_ppo_batch(transitions)
             
             # Multiple PPO epochs
-            for _ in range(4):  # PPO epochs
+            for ppo_epoch in range(4):  # PPO epochs
                 loss_dict = self.train_step(batch)
                 self.metrics["policy_loss"].append(loss_dict["policy_loss"])
                 self.metrics["value_loss"].append(loss_dict["value_loss"])
                 self.metrics["entropy"].append(loss_dict["entropy"])
+                
+                # Log training metrics for each PPO epoch
+                if ppo_epoch == 0:  # Log first epoch for detailed tracking
+                    logger.info(f"[Episode {episode}] PPO Epoch {ppo_epoch} - Training Losses:")
+                    logger.info(f"  Policy loss: {loss_dict['policy_loss']:.6f}")
+                    logger.info(f"  Value loss: {loss_dict['value_loss']:.6f}")
+                    logger.info(f"  Entropy: {loss_dict['entropy']:.6f}")
+                    logger.info(f"  Total loss: {loss_dict['total_loss']:.6f}")
             
             self.metrics["total_steps"] += len(transitions)
             self.scheduler.step()
             
-            # Logging
-            if (episode + 1) % self.config.log_every == 0:
+            # Logging (only on main process)
+            if (episode + 1) % self.config.log_every == 0 and is_main_process:
                 self._log_episode_metrics(episode)
             
-            # Save checkpoint
-            if (episode + 1) % self.config.save_every == 0:
+            # Save checkpoint (only on main process)
+            if (episode + 1) % self.config.save_every == 0 and is_main_process:
                 self.save_checkpoint(
                     episode,
                     extra_state={
@@ -769,8 +1097,16 @@ class StudentTrainer(BaseRLTrainer):
                 torch.from_numpy(t["obs"]["state"]).float() 
                 for t in transitions
             ]).to(self.device),
+            "actions": torch.stack([
+                torch.from_numpy(t["action"]).float()
+                for t in transitions
+            ]).to(self.device),
             "old_log_probs": torch.tensor(
                 [t["log_prob"] for t in transitions],
+                device=self.device
+            ),
+            "old_values": torch.tensor(
+                [t["value"] for t in transitions],
                 device=self.device
             ),
             "advantages": torch.tensor(
@@ -783,6 +1119,30 @@ class StudentTrainer(BaseRLTrainer):
             ),
         }
         
+        # Add action history
+        batch["action_history"] = torch.stack([
+            torch.from_numpy(t["obs"]["action_history"]).float()
+            for t in transitions
+        ]).to(self.device)
+        
+        # Add task prompt
+        batch["task"] = ["explore the environment\n"] * len(transitions)
+        
+        # Add image data for student model
+        # Student uses wrist_rgb as image0, and wrist_rgb history for world model
+        if "wrist_rgb" in transitions[0]["obs"]:
+            # World Model history (image0_history)
+            wrist_histories = []
+            current_wrists = []
+            for t in transitions:
+                wrist_imgs = t["obs"]["wrist_rgb"]  # [T, C, H, W]
+                wrist_histories.append(torch.from_numpy(wrist_imgs).float() / 255.0 * 2.0 - 1.0)
+                current_wrists.append(torch.from_numpy(wrist_imgs[-1]).float() / 255.0 * 2.0 - 1.0)
+            
+            batch["observation.images.image0_history"] = torch.stack(wrist_histories).to(self.device)
+            batch["observation.images.image0"] = torch.stack(current_wrists).to(self.device)
+            batch["observation.images.image0_mask"] = torch.ones(len(transitions), dtype=torch.bool, device=self.device)
+        
         # Normalize advantages
         batch["advantages"] = (batch["advantages"] - batch["advantages"].mean()) / (
             batch["advantages"].std() + 1e-8
@@ -792,7 +1152,7 @@ class StudentTrainer(BaseRLTrainer):
     
     def _log_episode_metrics(self, episode: int):
         """Log training metrics."""
-        self.log_metrics(episode, {
+        metrics = {
             "policy_loss": np.mean(self.metrics["policy_loss"]) if self.metrics["policy_loss"] else 0,
             "value_loss": np.mean(self.metrics["value_loss"]) if self.metrics["value_loss"] else 0,
             "entropy": np.mean(self.metrics["entropy"]) if self.metrics["entropy"] else 0,
@@ -800,7 +1160,42 @@ class StudentTrainer(BaseRLTrainer):
             "wm_uncertainty": np.mean(self.metrics["wm_uncertainty"]) if self.metrics["wm_uncertainty"] else 0,
             "episode_reward": np.mean(self.metrics["episode_reward"]) if self.metrics["episode_reward"] else 0,
             "lr": self.scheduler.get_last_lr()[0],
-        })
+        }
+        
+        # Calculate statistics over recent episodes
+        recent_window = 10
+        recent_rewards = list(self.metrics["episode_reward"])[-recent_window:]
+        recent_mem_div = list(self.metrics["memory_divergence"])[-recent_window:]
+        recent_p_loss = list(self.metrics["policy_loss"])[-recent_window:]
+        
+        # Log to tensorboard
+        self.log_metrics(episode, metrics)
+        
+        # Log detailed console output
+        logger.info("=" * 80)
+        logger.info(f"Episode {episode} - Aggregated Metrics Summary:")
+        logger.info(f"  Reward: {metrics['episode_reward']:.4f} (recent avg: {np.mean(recent_rewards):.4f}, std: {np.std(recent_rewards):.4f})")
+        logger.info(f"  Policy Loss: {metrics['policy_loss']:.6f} (recent avg: {np.mean(recent_p_loss):.6f})")
+        logger.info(f"  Value Loss: {metrics['value_loss']:.6f}")
+        logger.info(f"  Entropy: {metrics['entropy']:.6f}")
+        logger.info(f"  Memory Div Reward: {metrics['memory_divergence']:.6f} (recent avg: {np.mean(recent_mem_div):.6f})")
+        logger.info(f"  WM Uncertainty: {metrics['wm_uncertainty']:.6f}")
+        logger.info(f"  Learning Rate: {metrics['lr']:.2e}")
+        logger.info(f"  Total Steps: {self.metrics['total_steps']}")
+        logger.info(f"  Log Std: mean={self.log_std.mean().item():.4f}, std={self.log_std.std().item():.4f}")
+        logger.info("=" * 80)
+        
+        # Legacy format for compatibility
+        logger.info(
+            f"Episode {episode}: "
+            f"reward={metrics['episode_reward']:.2f}, "
+            f"p_loss={metrics['policy_loss']:.4f}, "
+            f"v_loss={metrics['value_loss']:.4f}, "
+            f"entropy={metrics['entropy']:.4f}, "
+            f"mem_div={metrics['memory_divergence']:.4f}, "
+            f"wm_unc={metrics['wm_uncertainty']:.4f}, "
+            f"lr={metrics['lr']:.2e}"
+        )
 
 
 def main():
@@ -808,9 +1203,6 @@ def main():
     
     # Load RL config
     rl_config = load_rl_config(args.rl_config)
-    
-    # Setup logging from config (must be done early)
-    setup_logging_from_config(rl_config)
     
     # Apply command-line overrides
     if args.model_config:
@@ -835,41 +1227,78 @@ def main():
     if args.use_ddp:
         accelerator = create_accelerator(mixed_precision="no")
         device = str(accelerator.device)
+        is_main_process = accelerator.is_main_process
         accelerator.print("=" * 70)
         accelerator.print("Student Policy Training (Phase 2) - DDP Mode")
         accelerator.print(f"Number of processes: {accelerator.num_processes}")
         accelerator.print("=" * 70)
     else:
-        device = rl_config.get("device", "cuda")
+        device = rl_config.get("device", "cuda:0")
+        # Ensure device has an index for torch.cuda.set_device
+        if device == "cuda":
+            device = "cuda:0"
+        is_main_process = True
         logger.info("=" * 70)
         logger.info("Student Policy Training (Phase 2)")
         logger.info("=" * 70)
     
+    # Setup logging from config (after accelerator is created so we know if main process)
+    setup_logging_from_config(rl_config, is_main_process=is_main_process)
+    
+    # Log startup information
+    if is_main_process:
+        logger.info("=" * 70)
+        logger.info("Student Policy Training (Phase 2) - Starting")
+        logger.info(f"Teacher checkpoint: {args.teacher_path}")
+        logger.info(f"Number of episodes: {args.num_episodes or rl_config.training.num_episodes}")
+        logger.info(f"Using DDP: {args.use_ddp}")
+        if args.use_ddp:
+            logger.info(f"Number of processes: {accelerator.num_processes}")
+        logger.info("=" * 70)
+    
     debug = rl_config.get("debug", False)
     
-    # Load model config file path
-    model_config_file = rl_config.get("model", {}).get(
-        "config_file",
-        "/mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml"
-    )
+    # Determine model configuration source
+    if hasattr(rl_config, "f1_vla") and rl_config.f1_vla is not None:
+        if is_main_process:
+            logger.info("Using embedded F1-VLA configuration from RL config")
+        model_config_source = rl_config.f1_vla
+    else:
+        # Fallback to external file
+        model_config_file = rl_config.get("model", {}).get(
+            "config_file",
+            "/mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml"
+        )
+        if model_config_file is None:
+             # If explicitly null in config but no f1_vla section, fallback to default
+             model_config_file = "/mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml"
+             
+        if is_main_process:
+            logger.info(f"Using external F1-VLA configuration file: {model_config_file}")
+        model_config_source = model_config_file
     
     # Get LoRA config
     lora_config = get_lora_config_from_dict(rl_config)
+    
+    # Create specific LoRA config for Teacher (matching the checkpoint training settings)
+    # Teacher was trained with only ["q_proj", "v_proj"]
+    teacher_lora_config = copy.deepcopy(lora_config)
+    teacher_lora_config.target_modules = ["q_proj", "v_proj"]
     
     # Load teacher policy (frozen)
     if accelerator is None or accelerator.is_main_process:
         logger.info(f"Loading teacher policy from: {args.teacher_path}")
     teacher_policy, _, _ = load_f1_policy(
-        config_file=model_config_file,
+        config_file=model_config_source,
         device=device,
         debug=debug,
-        lora_config=lora_config,
+        lora_config=teacher_lora_config,
         checkpoint_path=args.teacher_path,
     )
     
     # Load student policy (trainable)
     student_policy, policy_config, model_config = load_f1_policy(
-        config_file=model_config_file,
+        config_file=model_config_source,
         device=device,
         debug=debug,
         lora_config=lora_config,
@@ -888,7 +1317,7 @@ def main():
         teacher_policy=teacher_policy,
         policy_config=policy_config,
         rl_config=rl_config,
-        model_config_file=model_config_file,
+        model_config=model_config_source,
         device=device,
         accelerator=accelerator,
         num_envs=args.num_envs,
@@ -896,9 +1325,19 @@ def main():
     
     # Resume training if specified
     start_episode = 0
-    if args.resume:
-        logger.info(f"Resuming training from {args.resume}")
-        start_episode = trainer.load_checkpoint(args.resume)
+    resume_path = args.resume
+    
+    # Auto-resume: find latest checkpoint in output_dir
+    if args.auto_resume and not resume_path:
+        latest_ckpt = trainer.find_latest_checkpoint()
+        if latest_ckpt:
+            resume_path = str(latest_ckpt)
+            logger.info(f"Auto-resume: found latest checkpoint at {resume_path}")
+    
+    if resume_path:
+        logger.info(f"Resuming training from {resume_path}")
+        start_episode = trainer.load_checkpoint(resume_path)
+        logger.info(f"Resumed from episode {start_episode}")
     
     # Train
     trainer.train(start_episode=start_episode)

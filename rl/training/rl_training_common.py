@@ -90,7 +90,7 @@ def setup_sapien_gpu(gpu_id: Optional[int] = None):
 # Logging Configuration
 # =============================================================================
 
-def setup_logging_from_config(config: DictConfig, is_main_process: bool = True) -> None:
+def setup_logging_from_config(config: DictConfig, is_main_process: bool = True, log_file: str = None) -> None:
     """
     Setup logging based on config file settings.
     
@@ -98,6 +98,7 @@ def setup_logging_from_config(config: DictConfig, is_main_process: bool = True) 
         config: Full RL config with logging section
         is_main_process: Whether this is the main process (for DDP).
                         Non-main processes only log WARNING+ to reduce noise.
+        log_file: Path to log file. If None, uses timestamped file in logs/ directory.
     """
     log_cfg = config.get("logging", {})
     console_level = log_cfg.get("console_level", "WARNING").upper()
@@ -142,15 +143,33 @@ def setup_logging_from_config(config: DictConfig, is_main_process: bool = True) 
     
     # File handler (optional, only on main process)
     if enable_file and is_main_process:
-        os.makedirs("logs", exist_ok=True)
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_handler = logging.FileHandler(f"logs/rl_training_{timestamp}.log")
+        if log_file is None:
+            os.makedirs("logs", exist_ok=True)
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = f"logs/rl_training_{timestamp}.log"
+        else:
+            # Create parent directory if needed
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_handler = logging.FileHandler(log_file, mode='a')  # Append mode
         file_handler.setLevel(file_lvl)
         file_handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         ))
         root_logger.addHandler(file_handler)
+        
+        # Log confirmation message to file
+        logger.info(f"=" * 70)
+        logger.info(f"Logging system initialized")
+        logger.info(f"Log file: {log_file}")
+        logger.info(f"Console level: {console_level}, File level: {file_level}")
+        logger.info(f"=" * 70)
+        
+        # Force flush handlers
+        for handler in root_logger.handlers:
+            handler.flush()
     
     # Suppress verbose loggers from third-party libraries
     for lib_name in ["curobo", "sapien", "warp", "nvdiffrast", "trimesh", 
@@ -178,6 +197,7 @@ class LoRAConfig:
 
 
 @dataclass
+@dataclass
 class TrainingConfig:
     """Training configuration shared across phases."""
     # Dimensions
@@ -197,6 +217,7 @@ class TrainingConfig:
     num_episodes: int = 10000
     steps_per_episode: int = 50
     batch_size: int = 8
+    mini_batch_size: int = 32
     
     # Logging
     log_every: int = 10
@@ -279,6 +300,7 @@ def get_training_config(config: DictConfig) -> TrainingConfig:
         num_episodes=train_cfg.get("num_episodes", 10000),
         steps_per_episode=train_cfg.get("steps_per_episode", 50),
         batch_size=train_cfg.get("batch_size", 8),
+        mini_batch_size=train_cfg.get("mini_batch_size", 32),
         log_every=train_cfg.get("log_every", 10),
         save_every=train_cfg.get("save_every", 1000),
         sequential_training=train_cfg.get("sequential_training", True),
@@ -434,7 +456,7 @@ def get_environment_config(config: DictConfig, num_steps: Optional[int] = None) 
 # =============================================================================
 
 def load_f1_policy(
-    config_file: str,
+    config_file: Union[str, DictConfig],
     device: str = "cuda",
     debug: bool = False,
     lora_config: Optional[LoRAConfig] = None,
@@ -445,7 +467,7 @@ def load_f1_policy(
     Load F1-VLA policy with optional LoRA and checkpoint.
     
     Args:
-        config_file: Path to model YAML config file
+        config_file: Path to model YAML config file OR DictConfig object
         device: Device to use
         debug: If True, create model from scratch
         lora_config: LoRA configuration (None to skip LoRA)
@@ -485,16 +507,32 @@ def load_f1_policy(
     from f1_vla.src.policies.f1_policy import F1_VLA
     from f1_vla.src.utils.utils import load_ckpt, set_policy_config, unfreeze_memory_params
     
-    # Load config from YAML
-    _print("  Loading config file...")
-    config = OmegaConf.load(Path(config_file))
+    # Load config from YAML if string
+    if isinstance(config_file, (str, Path)):
+        _print("  Loading config file...")
+        config = OmegaConf.load(Path(config_file))
+    else:
+        config = config_file
     
     # Load F1Config and set policy config
-    _print(f"  Loading F1Config from: {config.policy.ckpt_path}")
-    policy_config = F1Config.from_pretrained(config.policy.ckpt_path)
+    if hasattr(config.policy, "f1_config") and config.policy.f1_config is not None:
+        _print("  Loading F1Config from embedded config...")
+        # Convert DictConfig to dict for initialization
+        f1_config_dict = OmegaConf.to_container(config.policy.f1_config, resolve=True)
+        # Filter out keys that are not in F1Config.__init__ if necessary, 
+        # but F1Config inherits from PretrainedConfig which handles kwargs.
+        # However, F1Config.__init__ has specific args.
+        # Let's assume F1Config handles extra args gracefully or we pass them as kwargs.
+        # Actually F1Config inherits from PretrainedConfig, so we can use from_dict or just init.
+        # Using from_dict is safer as it handles common PretrainedConfig params.
+        policy_config = F1Config.from_dict(f1_config_dict)
+    else:
+        _print(f"  Loading F1Config from: {config.policy.ckpt_path}")
+        policy_config = F1Config.from_pretrained(config.policy.ckpt_path)
+    
     policy_config = set_policy_config(policy_config, config.policy)
     
-    logger.debug(f"Policy config loaded from: {config.policy.ckpt_path}")
+    logger.debug(f"Policy config loaded")
     logger.debug(f"Pretrained path: {policy_config.pretrained_path}")
     logger.debug(f"Use world model: {policy_config.use_world_model}")
     
@@ -516,13 +554,7 @@ def load_f1_policy(
             _print("  Creating model from scratch (debug mode)")
             policy = F1_VLA(**kwargs)
         
-        # Load additional checkpoint if specified
-        if checkpoint_path and os.path.exists(checkpoint_path):
-            _print(f"  Loading checkpoint from: {checkpoint_path}")
-            load_config = OmegaConf.create({"exp": {"load_ckpt": checkpoint_path}})
-            policy = load_ckpt(policy, load_config)
-        
-        # Apply LoRA if configured
+        # Apply LoRA BEFORE loading RL checkpoint (RL checkpoint was saved with LoRA wrapper)
         if lora_config is not None:
             _print("  Applying LoRA configuration...")
             from peft import get_peft_model, LoraConfig as PeftLoraConfig
@@ -537,6 +569,49 @@ def load_f1_policy(
             )
             policy = get_peft_model(policy, peft_config)
             logger.debug("Applied LoRA configuration")
+        
+        # Load additional checkpoint if specified (AFTER LoRA is applied)
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            _print(f"  Loading checkpoint from: {checkpoint_path}")
+            checkpoint_path = Path(checkpoint_path)
+            
+            # Support both .safetensors and .pt formats
+            if checkpoint_path.is_dir():
+                # Check for RL checkpoint (model.pt) first, then safetensors
+                pt_file = checkpoint_path / "model.pt"
+                safetensors_file = checkpoint_path / "model.safetensors"
+                
+                if pt_file.exists():
+                    _print(f"  Loading RL checkpoint (model.pt)")
+                    state_dict = torch.load(pt_file, map_location="cpu", weights_only=False)
+                    # Load with strict=False to handle potential mismatches
+                    missing, unexpected = policy.load_state_dict(state_dict, strict=False)
+                    if missing:
+                        _print(f"  Warning: Missing keys: {len(missing)}")
+                        logger.debug(f"Missing keys: {missing[:5]}...")
+                    if unexpected:
+                        _print(f"  Warning: Unexpected keys: {len(unexpected)}")
+                        logger.debug(f"Unexpected keys: {unexpected[:5]}...")
+                    _print(f"  RL checkpoint loaded successfully")
+                elif safetensors_file.exists():
+                    load_config = OmegaConf.create({"exp": {"load_ckpt": str(checkpoint_path)}})
+                    policy = load_ckpt(policy, load_config)
+                else:
+                    raise FileNotFoundError(
+                        f"No checkpoint found in {checkpoint_path}. "
+                        f"Expected either model.pt or model.safetensors"
+                    )
+            elif str(checkpoint_path).endswith(".pt"):
+                _print(f"  Loading .pt checkpoint")
+                state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                missing, unexpected = policy.load_state_dict(state_dict, strict=False)
+                if missing:
+                    _print(f"  Warning: Missing keys: {len(missing)}")
+                if unexpected:
+                    _print(f"  Warning: Unexpected keys: {len(unexpected)}")
+            else:
+                load_config = OmegaConf.create({"exp": {"load_ckpt": str(checkpoint_path)}})
+                policy = load_ckpt(policy, load_config)
         
         # Unfreeze memory-related parameters
         unfrozen = unfreeze_memory_params(policy)
@@ -830,10 +905,11 @@ class BaseRLTrainer(ABC):
     Base class for RL trainers.
     
     Provides common functionality:
-    - Checkpoint saving/loading
+    - Checkpoint saving/loading with auto-resume
     - Metrics tracking
     - Tensorboard logging
     - Memory state management
+    - Sequential training with BPTT support
     """
     
     def __init__(
@@ -842,12 +918,15 @@ class BaseRLTrainer(ABC):
         config: TrainingConfig,
         output_dir: str,
         device: str = "cuda",
+        accelerator = None,
     ):
         self.policy = policy
         self.config = config
         self.device = device
+        self.accelerator = accelerator
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self._is_main_process():
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Memory state manager
         self.memory_manager = MemoryStateManager()
@@ -855,8 +934,16 @@ class BaseRLTrainer(ABC):
         # Batch builder
         self.batch_builder = BatchBuilder(device=device)
         
-        # Tensorboard
-        self.writer = SummaryWriter(self.output_dir / "tensorboard")
+        # Sequential training config (can be overridden by subclass)
+        self.sequential_training = getattr(config, 'sequential_training', False)
+        self.bptt_length = getattr(config, 'bptt_length', 8)
+        self.memory_backprop = getattr(config, 'memory_backprop', False)
+        
+        # Tensorboard (only on main process)
+        if self._is_main_process():
+            self.writer = SummaryWriter(self.output_dir / "tensorboard")
+        else:
+            self.writer = None
         
         # Metrics
         self.metrics: Dict[str, Any] = {
@@ -866,6 +953,51 @@ class BaseRLTrainer(ABC):
         
         # Environment (to be set by subclass)
         self.env = None
+        
+        # Optimizer and scheduler (to be set by subclass)
+        self.optimizer = None
+        self.scheduler = None
+    
+    def _is_main_process(self) -> bool:
+        """Check if this is the main process (for DDP)."""
+        if self.accelerator is None:
+            return True
+        return self.accelerator.is_main_process
+    
+    def _print(self, msg: str):
+        """Print only on main process."""
+        if self._is_main_process():
+            print(msg)
+    
+    def _init_memory_state(self, batch_size: int = 1) -> torch.Tensor:
+        """
+        Initialize memory state tensor to zeros.
+        
+        Args:
+            batch_size: Batch size for the memory state
+            
+        Returns:
+            Zero-initialized memory state tensor [num_layers, batch_size, hidden_dim]
+        """
+        # Get memory config from policy config
+        memory_num_layers = getattr(self.config, 'memory_num_layers', 4)
+        memory_hidden = getattr(self.config, 'memory_hidden', 2048)
+        
+        # Try to get from policy model config
+        policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
+        if hasattr(policy, 'model'):
+            model = policy.model
+            if hasattr(model, 'config'):
+                memory_num_layers = getattr(model.config, 'memory_num_layers', memory_num_layers)
+                memory_hidden = getattr(model.config, 'memory_hidden', memory_hidden)
+        
+        return torch.zeros(
+            memory_num_layers,
+            batch_size,
+            memory_hidden,
+            device=self.device,
+            dtype=torch.float32,
+        )
     
     @abstractmethod
     def setup_environment(self):
@@ -913,29 +1045,55 @@ class BaseRLTrainer(ABC):
         
         Args:
             step: Current training step/episode
-            extra_state: Additional state to save
+            extra_state: Additional state to save (optimizer, scheduler, etc.)
         """
+        if not self._is_main_process():
+            return
+            
         checkpoint_dir = self.output_dir / f"checkpoint-{step}"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save PEFT model (adapter weights)
-        self.policy.save_pretrained(checkpoint_dir)
+        # Unwrap DDP model if needed
+        policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
+        
+        # Save model state dict (works for both regular and PEFT models)
+        torch.save(policy.state_dict(), checkpoint_dir / "model.pt")
+        
+        # Also try to save PEFT adapter if applicable
+        try:
+            if hasattr(policy, 'save_pretrained'):
+                policy.save_pretrained(checkpoint_dir / "peft_adapter")
+        except Exception:
+            pass  # Not a PEFT model
         
         # Save trainer state
         state = {
             "step": step,
-            "total_steps": self.metrics["total_steps"],
+            "total_steps": self.metrics.get("total_steps", 0),
             "metrics": {
                 k: list(v) if isinstance(v, deque) else v
                 for k, v in self.metrics.items()
             },
+            # Training config for reference
+            "config": {
+                "sequential_training": self.sequential_training,
+                "bptt_length": self.bptt_length,
+                "memory_backprop": self.memory_backprop,
+            },
         }
         
+        # Add optimizer and scheduler if available
+        if self.optimizer is not None:
+            state["optimizer"] = self.optimizer.state_dict()
+        if self.scheduler is not None:
+            state["scheduler"] = self.scheduler.state_dict()
+        
+        # Add extra state from subclass
         if extra_state:
             state.update(extra_state)
         
         torch.save(state, checkpoint_dir / "trainer_state.pt")
-        logger.debug(f"Saved checkpoint to {checkpoint_dir}")
+        logger.info(f"Saved checkpoint to {checkpoint_dir}")
     
     def load_checkpoint(self, checkpoint_dir: str) -> int:
         """
@@ -949,40 +1107,118 @@ class BaseRLTrainer(ABC):
         """
         checkpoint_path = Path(checkpoint_dir)
         
-        # Load PEFT adapter weights
-        logger.debug(f"Loading checkpoint from {checkpoint_path}")
+        if not checkpoint_path.exists():
+            logger.warning(f"Checkpoint directory not found: {checkpoint_path}")
+            return 0
         
-        try:
-            adapter_config_path = checkpoint_path / "adapter_config.json"
-            if adapter_config_path.exists():
-                self.policy.load_adapter(str(checkpoint_path), "default")
-                logger.debug("Loaded PEFT adapter weights")
-        except Exception as e:
-            logger.warning(f"Could not load PEFT adapter: {e}")
+        logger.info(f"Loading checkpoint from {checkpoint_path}")
+        
+        # Unwrap DDP model if needed
+        policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
+        
+        # Try to load model weights
+        model_path = checkpoint_path / "model.pt"
+        if model_path.exists():
+            try:
+                state_dict = torch.load(model_path, map_location=self.device)
+                policy.load_state_dict(state_dict, strict=False)
+                logger.info("Loaded model weights from model.pt")
+            except Exception as e:
+                logger.warning(f"Could not load model.pt: {e}")
+        
+        # Try to load PEFT adapter
+        peft_path = checkpoint_path / "peft_adapter"
+        if peft_path.exists():
+            try:
+                if hasattr(policy, 'load_adapter'):
+                    policy.load_adapter(str(peft_path), "default")
+                    logger.info("Loaded PEFT adapter weights")
+            except Exception as e:
+                logger.warning(f"Could not load PEFT adapter: {e}")
         
         # Load trainer state
         trainer_state_path = checkpoint_path / "trainer_state.pt"
+        start_step = 0
         if trainer_state_path.exists():
-            state = torch.load(trainer_state_path, map_location=self.device)
-            self.metrics["total_steps"] = state.get("total_steps", 0)
-            
-            # Restore metrics
-            if "metrics" in state:
-                for key, value in state["metrics"].items():
-                    if key in self.metrics and isinstance(self.metrics[key], deque):
-                        self.metrics[key] = deque(value, maxlen=self.metrics[key].maxlen)
-                    elif key in self.metrics:
-                        self.metrics[key] = value
-            
-            return state.get("step", 0)
+            try:
+                state = torch.load(trainer_state_path, map_location=self.device)
+                
+                # Restore optimizer state
+                if self.optimizer is not None and "optimizer" in state:
+                    try:
+                        self.optimizer.load_state_dict(state["optimizer"])
+                        logger.info("Loaded optimizer state")
+                    except Exception as e:
+                        logger.warning(f"Could not load optimizer state: {e}")
+                
+                # Restore scheduler state
+                if self.scheduler is not None and "scheduler" in state:
+                    try:
+                        self.scheduler.load_state_dict(state["scheduler"])
+                        logger.info("Loaded scheduler state")
+                    except Exception as e:
+                        logger.warning(f"Could not load scheduler state: {e}")
+                
+                # Restore metrics
+                self.metrics["total_steps"] = state.get("total_steps", 0)
+                if "metrics" in state:
+                    for key, value in state["metrics"].items():
+                        if key in self.metrics and isinstance(self.metrics[key], deque):
+                            self.metrics[key] = deque(value, maxlen=self.metrics[key].maxlen)
+                        elif key in self.metrics:
+                            self.metrics[key] = value
+                
+                start_step = state.get("step", 0)
+                
+                # Log saved config
+                saved_config = state.get("config", {})
+                if saved_config:
+                    logger.info(f"Checkpoint config: {saved_config}")
+                    
+            except Exception as e:
+                logger.warning(f"Could not load trainer state: {e}")
         
-        return 0
+        # Synchronize all processes after loading
+        if self.accelerator and self.accelerator.is_distributed:
+            self.accelerator.wait_for_everyone()
+        
+        logger.info(f"Resuming from step {start_step}")
+        return start_step
+    
+    def find_latest_checkpoint(self) -> Optional[Path]:
+        """
+        Find the latest checkpoint in output_dir based on step number.
+        
+        Returns:
+            Path to latest checkpoint directory, or None if no checkpoints found.
+        """
+        if not self.output_dir.exists():
+            return None
+        
+        checkpoints = []
+        for item in self.output_dir.iterdir():
+            if item.is_dir() and item.name.startswith("checkpoint-"):
+                try:
+                    step = int(item.name.split("-")[1])
+                    checkpoints.append((step, item))
+                except (ValueError, IndexError):
+                    continue
+        
+        if not checkpoints:
+            return None
+        
+        # Sort by step number and return the latest
+        checkpoints.sort(key=lambda x: x[0], reverse=True)
+        latest = checkpoints[0][1]
+        logger.info(f"Found latest checkpoint: {latest}")
+        return latest
     
     def log_metrics(self, step: int, metrics_dict: Dict[str, float]):
         """Log metrics to tensorboard and console."""
-        # Tensorboard
-        for key, value in metrics_dict.items():
-            self.writer.add_scalar(f"train/{key}", value, step)
+        # Tensorboard (only on main process where writer is initialized)
+        if self.writer is not None:
+            for key, value in metrics_dict.items():
+                self.writer.add_scalar(f"train/{key}", value, step)
         
         # Console (only at debug level - use tqdm in training loop for console output)
         metrics_str = ", ".join(f"{k}={v:.4f}" for k, v in metrics_dict.items())

@@ -243,11 +243,9 @@ class WorldModelTrainer:
         if self._is_main_process():
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Read video/sample save frequency from shared `training` config so it applies
-        # to all phases (teacher/student/adversarial)
+        # Read video save frequency from shared `training` config
         train_cfg = rl_config.get("training", {})
         self.video_save_every = int(train_cfg.get("video_save_every", 1))
-        self.sample_save_every = int(train_cfg.get("sample_save_every", 1))
         
         # Setup policy for training - configure to train world model only
         self.policy.train()
@@ -339,10 +337,9 @@ class WorldModelTrainer:
         self.env_collector = None
         self.env = None  # Single env fallback
         
-        # Ensure output directories for logging and samples
+        # Ensure output directories for logging and videos
         if self._is_main_process():
             self.metrics_log_path = self.output_dir / "episode_metrics.jsonl"
-            (self.output_dir / "samples").mkdir(parents=True, exist_ok=True)
             (self.output_dir / "videos").mkdir(parents=True, exist_ok=True)
         else:
             self.metrics_log_path = None
@@ -351,7 +348,6 @@ class WorldModelTrainer:
         self.video_frames_head = []   # Head camera frames
         self.video_frames_wrist = []  # Wrist camera frames (GT for WM)
         self.video_transitions = []   # Store transitions for prediction comparison
-        # `video_save_every` and `sample_save_every` are read from `training` config
     
     def _print(self, msg: str):
         """Print only on main process."""
@@ -370,8 +366,11 @@ class WorldModelTrainer:
         # Set environment variables for distributed training BEFORE creating environments
         # These affect logging and GPU selection in the underlying task environment
         local_gpu_id = 0  # Default for single GPU
+        render_device_id = 0 # Logical ID for sapien.Device (CUDA)
+        
         if self.accelerator is not None:
             local_process_idx = self.accelerator.local_process_index
+            render_device_id = local_process_idx # Always use logical index for CUDA
             
             # SAPIEN uses Vulkan rendering which doesn't respect CUDA_VISIBLE_DEVICES.
             # We need to map the local process index to the actual physical GPU ID.
@@ -420,7 +419,7 @@ class WorldModelTrainer:
         
         def create_env():
             # Capture local_gpu_id in closure
-            gpu_id = local_gpu_id
+            gpu_id = render_device_id
             logger.debug(f"create_env: gpu_id = {gpu_id}")
             return TeacherEnv(
                 task_config={
@@ -540,14 +539,13 @@ class WorldModelTrainer:
             train_gen_expert_only=True,  # Only train world model
         )
         
-        # Extract and validate output memory state
+        # Extract and validate output memory state (only relevant when memory_enabled=true)
         output_memory_state = loss_dict.get("memory_state")
         if output_memory_state is not None:
             logger.debug(f"Memory state output: shape={output_memory_state.shape}, mean={output_memory_state.mean().item():.6f}")
             # Update memory manager with new state (detached)
             self.memory_manager.update(output_memory_state.detach())
-        else:
-            logger.warning("Model returned None memory_state - this may indicate a problem")
+        # Note: None memory_state is expected when memory_enabled=false in config
         
         # Backward pass (use accelerator if available)
         loss = loss_dict["loss"]
@@ -831,7 +829,7 @@ class WorldModelTrainer:
                     "fps": f"{fps:.1f}",
                 })
 
-            # Log metrics and save image samples periodically (only on main process)
+            # Log metrics periodically (only on main process)
             log_every = getattr(self.config, "log_every", None) or self.rl_config.get("training", {}).get("log_every", None)
             if log_every is None:
                 log_every = 10
@@ -853,22 +851,6 @@ class WorldModelTrainer:
                             fh.write(json.dumps(metrics_entry) + "\n")
                 except Exception:
                     logger.exception("Failed to write metrics log")
-
-            # Save sample image (every episode by default)
-            if (episode + 1) % self.sample_save_every == 0 and self._is_main_process():
-                try:
-                    # Get last trajectory from replay buffer
-                    if self.replay_buffer.num_episodes > 0:
-                        last_episode = list(self.replay_buffer.episodes)[-1]
-                        if last_episode:
-                            last = last_episode[-1]
-                            obs_before = last["obs"]
-                            action = last.get("action")
-                            obs_after = last.get("next_obs")
-                            if obs_before is not None and obs_after is not None:
-                                self._save_prediction_sample(episode + 1, obs_before, action, obs_after)
-                except Exception:
-                    logger.exception("Failed to save sample image")
             
             # Save video (every episode by default)
             if (episode + 1) % self.video_save_every == 0 and self._is_main_process():
@@ -943,118 +925,6 @@ class WorldModelTrainer:
         torch.save(metrics_snapshot, checkpoint_dir / "metrics.pt")
         
         logger.info(f"Checkpoint saved: {checkpoint_dir}")
-
-    def _save_prediction_sample(self, episode: int, obs_before: Dict[str, Any], action: Any, obs_after: Dict[str, Any]):
-        """Run the world model to predict next image and save a side-by-side comparison with ground truth.
-
-        Saves to `self.output_dir / 'samples'` with filename containing episode number.
-        Only runs on main process.
-        
-        IMPORTANT: Images in obs are in uint8 [0, 255] format with shape [T, C, H, W].
-        Model predicts in [-1, 1] range, so we need proper de-normalization.
-        
-        Layout: [head_rgb (context)] [GT wrist_rgb] [Predicted wrist_rgb]
-        """
-        if not self._is_main_process():
-            return
-        try:
-            # Build batch using environment helper (use head camera)
-            batch = self.env._build_policy_batch(obs_before, np.array(action, dtype=np.float32), use_head_camera=True)
-
-            # Unwrap policy and use for prediction
-            policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
-            policy.eval()  # Set to eval mode for inference
-            with torch.no_grad():
-                pred_out = policy.predict_images_only(batch)
-            pred_imgs = pred_out.get("pred_imgs")  # Tensor [B, C, H, W] or [B, T, C, H, W]
-            if pred_imgs is None:
-                return
-
-            # Use first sample in batch
-            pred = pred_imgs.detach().cpu()
-            if pred.ndim == 5:
-                # [B, T, C, H, W] -> take last predicted frame
-                pred = pred[:, -1]
-            pred = pred[0]  # [C, H, W]
-
-            # Helper to extract last frame from observation
-            def extract_frame(img_data):
-                """Extract last frame from [T, C, H, W] or [C, H, W] image data."""
-                if img_data.ndim == 4:
-                    frame = img_data[-1]  # [C, H, W]
-                else:
-                    frame = img_data  # [C, H, W]
-                # CHW -> HWC, ensure uint8
-                frame = np.transpose(frame, (1, 2, 0))
-                if frame.dtype != np.uint8:
-                    frame = frame.astype(np.uint8)
-                return frame
-
-            # Get head camera image (context) from obs_before
-            head_img = None
-            if "head_rgb" in obs_before:
-                head_img = extract_frame(obs_before["head_rgb"])
-
-            # Ground truth wrist image from obs_after
-            gt_raw = obs_after.get("wrist_rgb")
-            if gt_raw is None:
-                logger.warning("No wrist_rgb in obs_after for GT comparison")
-                return
-            gt_img = extract_frame(gt_raw)
-            
-            # Prediction is in [-1, 1] range from world model
-            # De-normalize: [-1, 1] -> [0, 1] -> [0, 255]
-            pred_np = ((pred + 1.0) / 2.0).clamp(0.0, 1.0).numpy()
-            pred_img = (np.transpose(pred_np, (1, 2, 0)) * 255.0).astype(np.uint8)  # [H, W, C]
-
-            # Log image stats for debugging
-            if head_img is not None:
-                logger.debug(f"Head image: range=[{head_img.min()}, {head_img.max()}], mean={head_img.mean():.1f}")
-            logger.debug(f"GT wrist image: range=[{gt_img.min()}, {gt_img.max()}], mean={gt_img.mean():.1f}")
-            logger.debug(f"Pred image: range=[{pred_img.min()}, {pred_img.max()}], mean={pred_img.mean():.1f}")
-
-            # Compose comparison image using PIL
-            from PIL import ImageDraw
-            gt_pil = Image.fromarray(gt_img)
-            pred_pil = Image.fromarray(pred_img)
-            
-            if head_img is not None:
-                # 3-panel layout: [head] [GT wrist] [Pred wrist]
-                head_pil = Image.fromarray(head_img)
-                combined_w = head_pil.width + gt_pil.width + pred_pil.width + 60  # gaps
-                combined_h = max(head_pil.height, gt_pil.height, pred_pil.height) + 30  # label space
-                combined = Image.new('RGB', (combined_w, combined_h), color=(255, 255, 255))
-                
-                x_offset = 10
-                combined.paste(head_pil, (x_offset, 25))
-                x_offset += head_pil.width + 20
-                combined.paste(gt_pil, (x_offset, 25))
-                x_offset_gt = x_offset
-                x_offset += gt_pil.width + 20
-                combined.paste(pred_pil, (x_offset, 25))
-                
-                # Draw labels
-                draw = ImageDraw.Draw(combined)
-                draw.text((10, 5), "Head (context)", fill=(0, 0, 0))
-                draw.text((x_offset_gt, 5), "GT (wrist)", fill=(0, 0, 0))
-                draw.text((x_offset, 5), "Predicted", fill=(0, 0, 0))
-            else:
-                # 2-panel layout: [GT wrist] [Pred wrist]
-                combined_w = gt_pil.width + pred_pil.width + 40
-                combined_h = max(gt_pil.height, pred_pil.height) + 30
-                combined = Image.new('RGB', (combined_w, combined_h), color=(255, 255, 255))
-                combined.paste(gt_pil, (10, 25))
-                combined.paste(pred_pil, (gt_pil.width + 30, 25))
-                
-                draw = ImageDraw.Draw(combined)
-                draw.text((10, 5), "GT (wrist_rgb)", fill=(0, 0, 0))
-                draw.text((gt_pil.width + 30, 5), "Predicted", fill=(0, 0, 0))
-            
-            out_path = self.output_dir / "samples" / f"episode_{episode:06d}.png"
-            combined.save(out_path)
-
-        except Exception:
-            logger.exception("Error while saving prediction sample")
     
     def _process_obs_image(self, img: np.ndarray) -> Optional[np.ndarray]:
         """Process observation image to HWC uint8 RGB format.
@@ -1232,6 +1102,11 @@ class WorldModelTrainer:
                             # De-normalize: [-1, 1] -> [0, 255]
                             pred_np = ((pred + 1.0) / 2.0).clamp(0.0, 1.0).numpy()
                             pred_frame = (np.transpose(pred_np, (1, 2, 0)) * 255.0).astype(np.uint8)
+                            
+                            # VAE outputs 256x256 images, resize to match GT frame size
+                            gt_h, gt_w = gt_frame.shape[:2]
+                            if pred_frame.shape[0] != gt_h or pred_frame.shape[1] != gt_w:
+                                pred_frame = cv2.resize(pred_frame, (gt_w, gt_h), interpolation=cv2.INTER_LINEAR)
                 except Exception as e:
                     logger.debug(f"Prediction failed for frame {i}: {e}")
                 

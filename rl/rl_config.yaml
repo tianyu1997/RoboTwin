@@ -11,7 +11,7 @@ logging:
   # File log level - set to WARNING to reduce file size
   file_level: "CRITICAL"
   # Enable/disable file logging
-  enable_file_logging: true
+  enable_file_logging: false
 
 # =============================================================================
 # Model Configuration
@@ -23,7 +23,7 @@ model:
   lora:
     r: 8
     lora_alpha: 32
-    target_modules: ["q_proj", "v_proj"]
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     lora_dropout: 0.1
     bias: "none"
     task_type: "CAUSAL_LM"
@@ -91,11 +91,11 @@ training:
   # history_length will be auto-calculated as: n_obs_img_steps + (n_obs_img_steps - 1) * obs_img_stride
   n_pred_img_steps: 1
   
-  # Training parameters
-  learning_rate: 1.0e-4
-  weight_decay: 1.0e-4
-  gradient_accumulation_steps: 4
-  max_grad_norm: 1.0
+  # Training parameters - adjusted for better convergence
+  learning_rate: 1.0e-5  # Reduced for stability
+  weight_decay: 1.0e-5
+  gradient_accumulation_steps: 2
+  max_grad_norm: 0.5  # Reduced from 1.0 for tighter clipping
   
   # Scheduler
   scheduler:
@@ -106,7 +106,9 @@ training:
   # Episode settings
   num_episodes: 10000
   steps_per_episode: 50
-  batch_size: 4
+  batch_size: 1
+  # Mini-batch size for PPO updates
+  mini_batch_size: 16
   
   # Logging & checkpointing
   log_every: 1
@@ -114,11 +116,12 @@ training:
   
   # Memory/Sequential processing
   # F1-VLA has memory_rnn that needs sequential state propagation
+  # Set to false when memory_enabled=false in f1_config.json
   sequential_training: true
   # BPTT (Backpropagation Through Time) sequence length for memory training
   # Longer sequences = better memory learning, but higher memory cost and gradient issues
   # Recommended: 4-8 for stability, up to 16 if memory is sufficient
-  bptt_length: 16
+  bptt_length: 4
   # Enable gradient flow through memory states (requires sequential_training=true)
   # When true, memory GRU can learn better encodings through backprop
   # When false, memory state is detached each step (faster but memory doesn't improve)
@@ -130,9 +133,8 @@ training:
   action_bounds:
     low: -1.0
     high: 1.0
-  # How often to save videos and sample images (1 = every episode)
-  video_save_every: 1
-  sample_save_every: 1
+  # How often to save videos (1 = every episode)
+  video_save_every: 20
 
 # =============================================================================
 # Phase 1: Teacher Training Configuration
@@ -162,18 +164,30 @@ student:
   train_action_head: true
   freeze_vision_encoder: true
   
-  # Reward weights
+  # Reward weights - adjusted based on training observations
   rewards:
-    memory_divergence_weight: 0.5
-    wm_uncertainty_weight: 0.5
+    # Memory divergence: NEW DESIGN - directly reward closeness to teacher
+    # Normalized divergence typically ranges from 0.1 to 2.0
+    # Higher weight to encourage strong memory alignment
+    memory_divergence_weight: 1.0
+    # World model uncertainty: encourage exploration that surprises WM
+    # Typical range: 3.0 to 8.0
+    wm_uncertainty_weight: 1.0
+    # Task success reward weight
+    task_success_weight: 1.0
   
-  # PPO parameters
+  # PPO parameters - adjusted for stability and exploration
   ppo:
-    clip_epsilon: 0.2
-    entropy_coef: 0.01
+    clip_epsilon: 0.2  # Standard PPO value
+    entropy_coef: 0.01  # Reduced from 0.05 for stability
     value_loss_coef: 0.5
     gamma: 0.99
     gae_lambda: 0.95
+    # Additional stability controls
+    normalize_advantages: true
+    clip_value_loss: true
+    # Max gradient norm for PPO optimizer
+    max_grad_norm: 1.0
 
 # =============================================================================
 # Phase 3: Adversarial Training Configuration
@@ -196,10 +210,10 @@ adversarial:
   wm_lr: 1.0e-4
   explorer_lr: 3.0e-4
   
-  # Explorer network
-  explorer:
-    hidden_dim: 256
-    image_encoder_dim: 512
+  # # Explorer network
+  # explorer:
+  #   hidden_dim: 256
+  #   image_encoder_dim: 512
 
 # =============================================================================
 # Device Configuration
