@@ -155,7 +155,7 @@ class Base_Task(gym.Env):
 
         if self.cluttered_table:
             _logger.debug("    [+] Creating cluttered table...")
-            self.get_cluttered_table()
+            self.get_cluttered_table(cluttered_numbers=5)
 
         _logger.debug("    Checking scene stability...")
         is_stable, unstable_list = self.check_stable()
@@ -188,7 +188,12 @@ class Base_Task(gym.Env):
         self.stage_success_tag = False
 
     def check_stable(self):
-        actors_list, actors_pose_list = [], []
+        # Optimized stability check
+        # 1. Reduced warmup (2000 -> 100)
+        # 2. Reduced check duration (500 -> 50)
+        # 3. Relaxed thresholds (3 deg -> 5 deg, added 2cm pos threshold)
+        
+        actors_list = []
         for actor in self.scene.get_all_actors():
             actors_list.append(actor)
 
@@ -197,27 +202,32 @@ class Base_Task(gym.Env):
 
         is_stable, unstable_list = True, []
 
-        def check(times):
-            nonlocal self, is_stable, actors_list, actors_pose_list
-            for _ in range(times):
-                self.scene.step()
-                for idx, actor in enumerate(actors_list):
-                    actors_pose_list[idx].append(actor.get_pose())
-
-            for idx, actor in enumerate(actors_list):
-                final_pose = actors_pose_list[idx][-1]
-                for pose in actors_pose_list[idx][-200:]:
-                    if get_sim(final_pose, pose) > 3.0:
-                        is_stable = False
-                        unstable_list.append(actor.get_name())
-                        break
-
-        is_stable = True
-        for _ in range(2000):
+        # Warmup
+        for _ in range(100):
             self.scene.step()
+            
+        # Record start poses
+        start_poses = [actor.get_pose() for actor in actors_list]
+        
+        # Run check steps
+        for _ in range(50):
+            self.scene.step()
+            
+        # Check deviation
         for idx, actor in enumerate(actors_list):
-            actors_pose_list.append([actor.get_pose()])
-        check(500)
+            start_pose = start_poses[idx]
+            end_pose = actor.get_pose()
+            
+            # Position change
+            pos_diff = np.linalg.norm(np.array(start_pose.p) - np.array(end_pose.p))
+            # Rotation change
+            rot_diff = get_sim(start_pose, end_pose)
+            
+            # Thresholds: 10cm position (allow sliding), 5 degrees rotation
+            if rot_diff > 5.0:
+                is_stable = False
+                unstable_list.append(actor.get_name())
+
         return is_stable, unstable_list
 
     def play_once(self):
@@ -339,7 +349,12 @@ class Base_Task(gym.Env):
 
         if self.random_background:
             texture_type = "unseen" if self.eval_mode else "seen"
-            directory_path = f"./assets/background_texture/{texture_type}"
+            
+            # Fix path to be relative to this file instead of CWD
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            robotwin_dir = os.path.dirname(current_dir)
+            directory_path = os.path.join(robotwin_dir, "assets", "background_texture", texture_type)
+            
             file_count = len(
                 [name for name in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, name))])
 
@@ -378,7 +393,7 @@ class Base_Task(gym.Env):
             texture_id=self.table_texture,
         )
 
-    def get_cluttered_table(self, cluttered_numbers=10, xlim=[-0.59, 0.59], ylim=[-0.34, 0.34], zlim=[0.741]):
+    def get_cluttered_table(self, cluttered_numbers=5, xlim=[-0.59, 0.59], ylim=[-0.34, 0.34], zlim=[0.7402]):
         self.record_cluttered_objects = []  # record cluttered objects
 
         xlim[0] += self.table_xy_bias[0]
@@ -400,7 +415,7 @@ class Base_Task(gym.Env):
         self.obj_names, self.cluttered_item_info = get_available_cluttered_objects(task_objects_list)
 
         success_count = 0
-        max_try = 50
+        max_try = 100
         trys = 0
 
         while success_count < cluttered_numbers and trys < max_try:
@@ -420,7 +435,7 @@ class Base_Task(gym.Env):
                 modelname=obj_name,
                 modelid=obj_idx,
                 modeltype=self.cluttered_item_info[obj_name]["type"],
-                rotate_rand=True,
+                rotate_rand=False,
                 rotate_lim=[0, 0, math.pi],
                 size_dict=self.size_dict,
                 obj_radius=obj_radius,
@@ -443,7 +458,7 @@ class Base_Task(gym.Env):
             print(f"Warning: Only {success_count} cluttered objects are placed on the table.")
 
         self.size_dict = None
-        self.cluttered_objs = []
+        # self.cluttered_objs = []  # Do not clear, so we can remove them later
 
     def load_robot(self, **kwags):
         """

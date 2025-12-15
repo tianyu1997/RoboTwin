@@ -32,6 +32,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from collections import deque
 import copy
 import logging
+import json
 import yaml
 from datetime import datetime
 
@@ -196,34 +197,19 @@ def load_embodiment_config(task_config: dict, base_dir: str = None) -> dict:
 
 def setup_env_logger(log_dir: str = "logs/env") -> logging.Logger:
     """Setup logger for F1RLEnv module."""
-    os.makedirs(log_dir, exist_ok=True)
+    # os.makedirs(log_dir, exist_ok=True)
     
     logger = logging.getLogger("f1_rl_env")
     if logger.handlers:  # Already configured
         return logger
         
-    logger.setLevel(logging.DEBUG)
+    # Disable logging by default to avoid creating large log files
+    logger.setLevel(logging.CRITICAL + 1)
     
-    # File handler with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_handler = logging.FileHandler(
-        os.path.join(log_dir, f"f1_rl_env_{timestamp}.log")
-    )
-    file_handler.setLevel(logging.DEBUG)
-    
-    # Console handler (WARNING level only)
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
-    
-    # Formatter
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    # Console handler (WARNING level only) - optional if needed
+    # console_handler = logging.StreamHandler()
+    # console_handler.setLevel(logging.WARNING)
+    # logger.addHandler(console_handler)
     
     return logger
 
@@ -262,7 +248,7 @@ class F1RLEnv(gym.Env):
         action_dim: int = 32,
         state_dim: int = 32,
         render_mode: str = "rasterize",
-        max_reset_retries: int = 10,  # Max retries for UnstableError during reset
+        max_reset_retries: int = 100,  # Max retries for UnstableError during reset
         action_scale: float = 1.0,  # Scale factor for action bounds (0-1), lower = smaller actions
         action_bounds: Optional[Dict[str, Tuple[float, float]]] = None,  # Custom action bounds override
         single_arm: bool = False,  # Single arm mode: only use left arm
@@ -856,7 +842,12 @@ class F1RLEnv(gym.Env):
             return 0.0, {"reward_type": "dummy"}
             
         # Build batch for world model prediction
-        batch = self._build_policy_batch(obs_before, action, use_head_camera=True)
+        batch = self._build_policy_batch(
+            obs_before, 
+            action, 
+            use_head_camera=True,
+            memory_state=self.teacher_memory_state
+        )
         
         with torch.no_grad():
             # Get world model prediction
@@ -912,8 +903,18 @@ class F1RLEnv(gym.Env):
             return 0.0, {"reward_type": "dummy"}
             
         # Build batch for prediction
-        batch_teacher = self._build_policy_batch(obs_before, action, use_head_camera=True)
-        batch_student = self._build_policy_batch(obs_before, action, use_head_camera=False)
+        batch_teacher = self._build_policy_batch(
+            obs_before, 
+            action, 
+            use_head_camera=True,
+            memory_state=self.teacher_memory_state
+        )
+        batch_student = self._build_policy_batch(
+            obs_before, 
+            action, 
+            use_head_camera=False,
+            memory_state=self.student_memory_state
+        )
         
         with torch.no_grad():
             # Get teacher's memory state at time t (before action) and t+1 (after action)
@@ -1008,6 +1009,7 @@ class F1RLEnv(gym.Env):
         obs: Dict[str, np.ndarray],
         action: np.ndarray,
         use_head_camera: bool = True,
+        memory_state: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Build batch dict for F1 policy forward pass.
         
@@ -1021,8 +1023,13 @@ class F1RLEnv(gym.Env):
                 - Stacked history [T, C, H, W] (from _build_observation)
             action: Action to take
             use_head_camera: Whether to use head camera (True) or wrist cameras (False)
+            memory_state: Optional initial memory state for the model
         """
         batch = {}
+        
+        # Add memory state if provided
+        if memory_state is not None:
+            batch["initial_memory_state"] = memory_state.to(self.device)
         
         # World model needs n_obs_img_steps frames
         # From debug_test.yaml: n_obs_img_steps=4, obs_img_stride=1

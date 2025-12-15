@@ -1,0 +1,237 @@
+
+============================================================
+World Model Training (Phase 1 - Supervised Learning)
+============================================================
+Distributed training: 4 processes
+Device: cuda:0
+Using DDP: True
+Mixed precision: bf16
+Num envs per GPU: 2
+============================================================
+Loading config from: /mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml
+Loading policy...
+14:15:01 [INFO] PyTorch version 2.7.1 available.
+  Loading config file...
+  Loading F1Config from: /mnt/data2/ty/F1-VLA/f1_vla/config/f1_config.json
+  Loading pretrained model from: /mnt/data2/ty/F1-VLA/pi0
+[93mFreeze vision encoder: True[0m
+[93mFreeze gen expert: False[0m
+[93mTrain act expert only: False[0m
+[93mTrain gen expert only: False[0m
+Loading weights from local directory: /mnt/data2/ty/F1-VLA/pi0
+14:16:06 [RANK 1] [WARNING] Loading checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+  Loading additional checkpoint...
+14:16:07 [WARNING] Loading checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+14:16:09 [RANK 2] [WARNING] Loading checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+14:16:09 [WARNING] Successfully loaded checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+  Pretrained weights loaded successfully
+  Applying LoRA configuration...
+14:16:09 [RANK 1] [WARNING] Successfully loaded checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+  Unfrozen 73 memory parameters
+  Moving model to cuda:0...
+14:16:11 [RANK 3] [WARNING] Loading checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+14:16:11 [RANK 2] [WARNING] Successfully loaded checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+  Model ready!
+Model loaded successfully
+Memory config: enabled=True, hidden=1024, layers=2
+World model config from /mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml:
+  n_obs_img_steps: 4 (input frames)
+  n_pred_img_steps: 1 (prediction frames)
+  history_length: 4 (observation buffer)
+  obs_img_stride: 1
+  num_processes: 4
+  num_envs_per_process: 2
+
+Configuring training mode: World Model only
+[93mFreeze vision encoder: True[0m
+[93mFreeze gen expert: False[0m
+[93mTrain act expert only: False[0m
+[93mTrain gen expert only: True[0m
+[93mTraining World Model Expert only[0m
+Trainable parameters: 33,023,010 / 4,238,560,181
+14:16:15 [RANK 3] [WARNING] Successfully loaded checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+14:16:23 [INFO] Loading domain_randomization from config: {'random_appearance': False, 'random_background': True, 'random_light': True, 'cluttered_table': True}
+Sequential training config: enabled=True, bptt_length=4, memory_backprop=True
+14:16:23 [INFO] Found latest checkpoint: outputs/teacher_rl/checkpoint-250
+Auto-resume: found latest checkpoint at outputs/teacher_rl/checkpoint-250
+Resuming from: outputs/teacher_rl/checkpoint-250
+14:16:39 [INFO] Loaded model weights from: outputs/teacher_rl/checkpoint-250/model.pt
+14:16:39 [INFO] Loaded optimizer state
+14:16:39 [INFO] Loaded scheduler state
+14:16:39 [INFO] Checkpoint was saved with config: {'sequential_training': True, 'bptt_length': 4, 'memory_backprop': True, 'batch_size': 1, 'n_obs_img_steps': 4, 'n_pred_img_steps': 1}
+14:16:39 [INFO] Resuming from episode 250
+Resumed from episode 250
+
+Setting up environment...
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+Environment ready! 2 parallel envs, single_arm=True
+Training:  12%|█████████▊                                                                    | 250/2000 [00:00<?, ?ep/s][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+Training:  12%|██▍                | 250/2000 [03:50<?, ?ep/s, loss=6.763, acc=0.049, lr=7.2e-06, steps=25100, fps=108.8]Training:  13%|▊     | 251/2000 [03:50<112:04:53, 230.70s/ep, loss=6.763, acc=0.049, lr=7.2e-06, steps=25100, fps=108.8][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+Training:  13%|▉      | 251/2000 [07:39<112:04:53, 230.70s/ep, loss=6.764, acc=0.049, lr=7.2e-06, steps=25200, fps=54.9]Training:  13%|▉      | 252/2000 [07:39<111:21:19, 229.34s/ep, loss=6.764, acc=0.049, lr=7.2e-06, steps=25200, fps=54.9][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 252/2000 [11:28<111:21:19, 229.34s/ep, loss=6.654, acc=0.055, lr=7.1e-06, steps=25300, fps=36.8]Training:  13%|▉      | 253/2000 [11:28<111:12:26, 229.16s/ep, loss=6.654, acc=0.055, lr=7.1e-06, steps=25300, fps=36.8][PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 253/2000 [15:22<111:12:26, 229.16s/ep, loss=6.702, acc=0.053, lr=7.1e-06, steps=25400, fps=27.5]Training:  13%|▉      | 254/2000 [15:22<112:04:43, 231.09s/ep, loss=6.702, acc=0.053, lr=7.1e-06, steps=25400, fps=27.5][PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 254/2000 [19:12<112:04:43, 231.09s/ep, loss=6.816, acc=0.048, lr=7.1e-06, steps=25500, fps=22.1]Training:  13%|▉      | 255/2000 [19:12<111:53:25, 230.83s/ep, loss=6.816, acc=0.048, lr=7.1e-06, steps=25500, fps=22.1][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 255/2000 [23:02<111:53:25, 230.83s/ep, loss=6.773, acc=0.049, lr=7.1e-06, steps=25600, fps=18.5]Training:  13%|▉      | 256/2000 [23:02<111:41:29, 230.56s/ep, loss=6.773, acc=0.049, lr=7.1e-06, steps=25600, fps=18.5][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 256/2000 [26:51<111:41:29, 230.56s/ep, loss=6.823, acc=0.047, lr=7.0e-06, steps=25700, fps=16.0]Training:  13%|▉      | 257/2000 [26:51<111:18:53, 229.91s/ep, loss=6.823, acc=0.047, lr=7.0e-06, steps=25700, fps=16.0][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 257/2000 [30:40<111:18:53, 229.91s/ep, loss=6.837, acc=0.046, lr=7.0e-06, steps=25800, fps=14.0]Training:  13%|▉      | 258/2000 [30:40<111:06:12, 229.61s/ep, loss=6.837, acc=0.046, lr=7.0e-06, steps=25800, fps=14.0][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 258/2000 [34:35<111:06:12, 229.61s/ep, loss=6.792, acc=0.047, lr=7.0e-06, steps=25900, fps=12.5]Training:  13%|▉      | 259/2000 [34:35<111:54:29, 231.40s/ep, loss=6.792, acc=0.047, lr=7.0e-06, steps=25900, fps=12.5][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+Training:  13%|▉      | 259/2000 [38:23<111:54:29, 231.40s/ep, loss=6.760, acc=0.049, lr=7.0e-06, steps=26000, fps=11.3][PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+moviepy is installed, but can't import moviepy.editor. Some packages could be missing [imageio, requests]
+14:55:52 [INFO] [Video] Saved: outputs/teacher_rl/videos/episode_000260.mp4 (46 frames, start_idx=3)
+Training:  13%|▉      | 260/2000 [38:59<116:39:29, 241.36s/ep, loss=6.760, acc=0.049, lr=7.0e-06, steps=26000, fps=11.3][PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+Training:  13%|▉      | 260/2000 [43:10<116:39:29, 241.36s/ep, loss=6.756, acc=0.048, lr=6.9e-06, steps=26100, fps=10.1]Training:  13%|▉      | 261/2000 [43:10<118:08:14, 244.56s/ep, loss=6.756, acc=0.048, lr=6.9e-06, steps=26100, fps=10.1][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+Training:  13%|█       | 261/2000 [47:19<118:08:14, 244.56s/ep, loss=6.669, acc=0.053, lr=6.9e-06, steps=26200, fps=9.2]Training:  13%|█       | 262/2000 [47:19<118:36:17, 245.67s/ep, loss=6.669, acc=0.053, lr=6.9e-06, steps=26200, fps=9.2][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+Training:  13%|█       | 262/2000 [52:43<118:36:17, 245.67s/ep, loss=6.758, acc=0.049, lr=6.9e-06, steps=26300, fps=8.3]Training:  13%|█       | 263/2000 [52:43<130:00:50, 269.46s/ep, loss=6.758, acc=0.049, lr=6.9e-06, steps=26300, fps=8.3][PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+Training:  13%|█       | 263/2000 [59:53<130:00:50, 269.46s/ep, loss=6.694, acc=0.053, lr=6.9e-06, steps=26400, fps=7.3]Training:  13%|█       | 264/2000 [59:53<153:22:04, 318.04s/ep, loss=6.694, acc=0.053, lr=6.9e-06, steps=26400, fps=7.3][PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+[PID 1847227] Created Scene with PhysxCpuSystem + RenderSystem(cuda:0)
+Training:  13%|▊     | 264/2000 [1:10:08<153:22:04, 318.04s/ep, loss=6.680, acc=0.052, lr=6.8e-06, steps=26500, fps=6.3]Training:  13%|▊     | 265/2000 [1:10:08<196:22:45, 407.47s/ep, loss=6.680, acc=0.052, lr=6.8e-06, steps=26500, fps=6.3][PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+[PID 1847228] Created Scene with PhysxCpuSystem + RenderSystem(cuda:1)
+[PID 1847230] Created Scene with PhysxCpuSystem + RenderSystem(cuda:3)
+[PID 1847229] Created Scene with PhysxCpuSystem + RenderSystem(cuda:2)
+W1211 15:30:20.429000 1846904 site-packages/torch/distributed/elastic/agent/server/api.py:719] Received Signals.SIGTERM death signal, shutting down workers
+W1211 15:30:20.433000 1846904 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1847227 closing signal SIGTERM
+W1211 15:30:20.433000 1846904 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1847228 closing signal SIGTERM
+W1211 15:30:20.433000 1846904 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1847229 closing signal SIGTERM
+W1211 15:30:20.433000 1846904 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1847230 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/home/user/miniconda3/envs/f1/bin/accelerate", line 7, in <module>
+    sys.exit(main())
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/accelerate/commands/accelerate_cli.py", line 50, in main
+    args.func(args)
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/accelerate/commands/launch.py", line 1226, in launch_command
+    multi_gpu_launcher(args)
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/accelerate/commands/launch.py", line 853, in multi_gpu_launcher
+    distrib_run.run(args)
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/run.py", line 883, in run
+    elastic_launch(
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 139, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 261, in launch_agent
+    result = agent.run()
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/elastic/metrics/api.py", line 138, in wrapper
+    result = f(*args, **kwargs)
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 711, in run
+    result = self._invoke_run(role)
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 870, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 84, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 1846904 got signal: 15

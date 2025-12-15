@@ -7,7 +7,7 @@
 set -e
 
 # Default CUDA devices if not set
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0, 1,2,3}
 
 # =============================================================================
 # Suppress verbose warnings for cleaner output
@@ -29,12 +29,15 @@ F1_VLA_DIR="$(dirname "$ROBOTWIN_DIR")"
 source /home/user/miniconda3/etc/profile.d/conda.sh
 conda activate f1
 
+# Fix for CUDA driver initialization failed
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+
 # Change to RoboTwin directory (required for relative paths in environment)
 cd "$ROBOTWIN_DIR"
 
 # Default values
 PHASE="${1:-teacher}"
-NUM_GPUS="${NUM_GPUS:-3}"
+NUM_GPUS="${NUM_GPUS:-4}"
 NUM_ENVS="${NUM_ENVS:-1}"  # Environments per GPU
 
 # Shift processed arguments
@@ -64,7 +67,7 @@ case "$PHASE" in
         
         # Check if teacher_path is provided, if not use default
         if [[ "$EXTRA_ARGS" != *"--teacher_path"* ]]; then
-            DEFAULT_TEACHER="/mnt/data2/ty/F1-VLA/RoboTwin/outputs/teacher_rl/checkpoint-memory"
+            DEFAULT_TEACHER="/mnt/data2/ty/F1-VLA/RoboTwin/outputs/teacher_rl/checkpoint-400"
             echo "[INFO] No teacher_path provided. Using default: $DEFAULT_TEACHER"
             EXTRA_ARGS="$EXTRA_ARGS --teacher_path $DEFAULT_TEACHER"
         fi
@@ -73,6 +76,14 @@ case "$PHASE" in
         SCRIPT="$SCRIPT_DIR/train_adversarial_rl.py"
         PHASE_NAME="Adversarial (Phase 3)"
         ;;
+    teacher_offline|offline)
+        SCRIPT="$SCRIPT_DIR/train_teacher_offline.py"
+        PHASE_NAME="Teacher Offline Training"
+        # Explicitly set output directory for offline training
+        if [[ "$EXTRA_ARGS" != *"--output_dir"* ]]; then
+            EXTRA_ARGS="--output_dir ./outputs/teacher_offline $EXTRA_ARGS"
+        fi
+        ;;
     *)
         echo "Unknown phase: $PHASE"
         echo ""
@@ -80,6 +91,7 @@ case "$PHASE" in
         echo ""
         echo "Phases:"
         echo "  teacher     Phase 1: Train World Model (supervised learning)"
+        echo "  teacher_offline Train World Model (offline from disk)"
         echo "  student     Phase 2: Train Student Policy (exploration)"
         echo "  adversarial Phase 3: Adversarial WM vs Explorer training"
         echo ""
@@ -97,50 +109,52 @@ echo "=============================================="
 echo ""
 
 # Setup logging
-LOG_DIR="$ROBOTWIN_DIR/logs"
+LOG_DIR="$ROBOTWIN_DIR/rl/logs"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LAUNCHER_LOG="$LOG_DIR/launcher_${TIMESTAMP}.log"
+LAUNCHER_LOG="$LOG_DIR/${PHASE}.log"
 
 # Create symlink to latest log
-ln -sf "$LAUNCHER_LOG" "$F1_VLA_DIR/latest_launcher.log"
-echo "Created symlink: $F1_VLA_DIR/latest_launcher.log -> $LAUNCHER_LOG"
+ln -sf "$LAUNCHER_LOG" "$F1_VLA_DIR/latest_$PHASE.log"
+echo "Created symlink: $F1_VLA_DIR/latest_$PHASE.log -> $LAUNCHER_LOG"
 
 echo "Redirecting output to: $LAUNCHER_LOG"
 echo "Running in background (detached)..."
+echo "Final EXTRA_ARGS: '$EXTRA_ARGS'"
 
 if [ "$NUM_GPUS" -gt 1 ]; then
     # Multi-GPU training with HuggingFace Accelerate
     echo "[INFO] Launching distributed training with $NUM_GPUS GPUs..."
     
-    # Create default accelerate config if not exists
+    # Create default accelerate config
     ACCELERATE_CONFIG_DIR="$HOME/.cache/huggingface/accelerate"
-    if [ ! -f "$ACCELERATE_CONFIG_DIR/default_config.yaml" ]; then
-        echo "[INFO] Creating default accelerate config..."
-        mkdir -p "$ACCELERATE_CONFIG_DIR"
-        cat > "$ACCELERATE_CONFIG_DIR/default_config.yaml" << EOF
+    echo "[INFO] Creating/Updating default accelerate config..."
+    mkdir -p "$ACCELERATE_CONFIG_DIR"
+    cat > "$ACCELERATE_CONFIG_DIR/default_config.yaml" << EOF
 compute_environment: LOCAL_MACHINE
 distributed_type: MULTI_GPU
-mixed_precision: 'no'
+mixed_precision: 'bf16'
 num_machines: 1
 num_processes: $NUM_GPUS
 use_cpu: false
 EOF
-    fi
     
     # Launch with accelerate
     nohup accelerate launch \
         --num_processes=$NUM_GPUS \
         --multi_gpu \
+        --mixed_precision=bf16 \
         "$SCRIPT" \
         --use_ddp \
         --num_envs=$NUM_ENVS \
+        --mixed_precision=bf16 \
         $EXTRA_ARGS > "$LAUNCHER_LOG" 2>&1 &
 else
     # Single GPU training
     echo "[INFO] Launching single GPU training..."
     nohup python "$SCRIPT" \
         --num_envs=$NUM_ENVS \
+        --mixed_precision=bf16 \
         $EXTRA_ARGS > "$LAUNCHER_LOG" 2>&1 &
 fi
 

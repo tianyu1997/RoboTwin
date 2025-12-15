@@ -89,6 +89,7 @@ from omegaconf import OmegaConf
 from rl.training.rl_training_common import (
     load_rl_config,
     get_training_config,
+    adjust_config_for_ddp,
     get_environment_config,
     get_lora_config_from_dict,
     load_f1_policy,
@@ -100,6 +101,10 @@ from rl.training.rl_training_common import (
     count_trainable_params,
     setup_logging_from_config,
     set_policy_requires_grad,
+    resolve_device_and_process,
+    print_startup_header,
+    create_summary_writer,
+    add_video_to_writer,
 )
 
 # Import parallel training utilities (uses HuggingFace Accelerate)
@@ -193,6 +198,13 @@ class WorldModelTrainer:
         self.rl_config = rl_config
         self.accelerator = accelerator
         self.num_envs = num_envs
+        # Output dir for logs/videos (teacher-specific)
+        self.output_dir = Path(self.rl_config.get("teacher", {}).get("output_dir", "outputs/teacher_rl"))
+        if self._is_main_process():
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # TensorBoard writer for teacher (only main process)
+        self.writer = create_summary_writer(self.output_dir, is_main_process=self._is_main_process())
         
         # Use accelerator device if available
         if accelerator is not None:
@@ -216,6 +228,10 @@ class WorldModelTrainer:
         
         # Get training config
         self.config = get_training_config(rl_config)
+        
+        # Adjust num_episodes for distributed training (Global -> Per-Process)
+        adjust_config_for_ddp(self.config, self.accelerator)
+            
         self.n_pred_img_steps = self.config.n_pred_img_steps
         
         # history_length is the observation buffer size (n_obs_img_steps)
@@ -714,6 +730,7 @@ class WorldModelTrainer:
         )
         
         start_time = time.time()
+        initial_steps = self.metrics["total_steps"]
         
         for episode in pbar:
             # Collect trajectory and add to replay buffer
@@ -818,8 +835,14 @@ class WorldModelTrainer:
             avg_acc = np.mean(ep_acc) if ep_acc else 0
             lr = self.scheduler.get_last_lr()[0]
             elapsed = time.time() - start_time
-            fps = self.metrics["total_steps"] / elapsed if elapsed > 0 else 0
+            # Calculate FPS based on steps taken in THIS run
+            current_run_steps = self.metrics["total_steps"] - initial_steps
+            fps = current_run_steps / elapsed if elapsed > 0 else 0
             
+            # Adjust FPS for distributed training (Global FPS)
+            if self.accelerator and self.accelerator.is_distributed:
+                fps *= self.accelerator.num_processes
+
             if self._is_main_process():
                 pbar.set_postfix({
                     "loss": f"{avg_loss:.3f}",
@@ -1048,6 +1071,9 @@ class WorldModelTrainer:
             gt_frames = []
             pred_frames = []
             
+            # Initialize memory state for video generation
+            memory_state = None
+            
             for i in range(start_idx, len(self.video_transitions) - 1):
                 trans = self.video_transitions[i]
                 next_trans = self.video_transitions[i + 1]
@@ -1089,8 +1115,19 @@ class WorldModelTrainer:
                             obs, np.array(action, dtype=np.float32), use_head_camera=True
                         )
                         
+                        # Add memory state to batch
+                        if memory_state is None:
+                             # Initialize to zeros
+                             batch_size = 1
+                             memory_state = self._init_memory_state(batch_size)
+                        
+                        batch["initial_memory_state"] = memory_state
+                        
                         with torch.no_grad():
                             pred_out = policy.predict_images_only(batch)
+                        
+                        # Update memory state for next step
+                        memory_state = pred_out.get("memory_state")
                         
                         pred_imgs = pred_out.get("pred_imgs")
                         if pred_imgs is not None:
@@ -1183,8 +1220,22 @@ class WorldModelTrainer:
                 
                 # Write frame (imageio expects RGB)
                 writer.append_data(combined)
+                # Collect frames for TensorBoard (main process only)
+                try:
+                    if self.writer is not None:
+                        if 'tb_frames' not in locals():
+                            tb_frames = []
+                        tb_frames.append(combined.copy())
+                except Exception:
+                    logger.exception("Failed to collect frame for TensorBoard")
             
             writer.close()
+            # Also add video to TensorBoard if writer is available
+            try:
+                if hasattr(self, 'writer') and self.writer is not None and 'tb_frames' in locals() and tb_frames:
+                    add_video_to_writer(self.writer, f"video/episode_{episode:06d}", tb_frames, episode, fps=10)
+            except Exception:
+                logger.exception("Failed to add episode video to TensorBoard")
             logger.info(f"[Video] Saved: {video_path} ({num_frames} frames, start_idx={start_idx})")
             
         except Exception:
@@ -1317,20 +1368,23 @@ def main():
     if args.debug is not None:
         rl_config.debug = args.debug
     
-    # Use accelerator device
-    device = str(accelerator.device)
+    # Resolve device and main-process flag (centralized logic)
+    device, is_main_process = resolve_device_and_process(accelerator, rl_config, args)
     debug = rl_config.get("debug", False)
-    
-    # Print startup info (only on main process)
-    if accelerator.is_main_process:
-        print("\n" + "=" * 60)
-        print("World Model Training (Phase 1 - Supervised Learning)")
-        print("=" * 60)
-        if accelerator.is_distributed:
-            print(f"Distributed training: {accelerator.num_processes} GPUs")
-        print(f"Device: {device}")
-        print(f"Mixed precision: {args.mixed_precision}")
-        print(f"Num envs per GPU: {args.num_envs}")
+
+    # Print a concise startup header (only main process prints)
+    extra_info = {
+        "Mixed precision": args.mixed_precision,
+        "Num envs per GPU": args.num_envs,
+    }
+    print_startup_header(
+        "World Model Training (Phase 1 - Supervised Learning)",
+        device,
+        is_main_process,
+        use_ddp=args.use_ddp,
+        num_processes=(getattr(accelerator, 'num_processes', None) if accelerator is not None else None),
+        extra=extra_info,
+    )
     
     # Load model config
     model_config_file = rl_config.get("model", {}).get(

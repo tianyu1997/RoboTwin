@@ -23,10 +23,13 @@ model:
   lora:
     r: 8
     lora_alpha: 32
-    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    # Only target gemma_expert and gemma_wm_expert, excluding paligemma (vision encoder + base LLM)
+    target_modules: '.*(gemma_expert|gemma_wm_expert).*(q_proj|v_proj|k_proj|o_proj|gate_proj|up_proj|down_proj)$'
     lora_dropout: 0.1
     bias: "none"
     task_type: "CAUSAL_LM"
+    # Modules to save (train fully) alongside LoRA adapters
+    modules_to_save: ["memory_gru", "memory_to_gemma", "memory_to_gemma_wm", "memory_gate_act", "memory_gate_wm"]
 
 # =============================================================================
 # Environment Configuration
@@ -34,15 +37,11 @@ model:
 environment:
   # Embodiment - single arm
   embodiment: ["franka-panda"]
-  
   # Single arm mode: only use left arm, right arm is disabled
   single_arm: true
   
-  # Scene reset interval: only regenerate scene every N episodes
-  # This significantly speeds up training by reusing the same scene
-  # Set to 1 to regenerate scene every episode (slow)
-  scene_reset_interval: 50
-  randomize_robot_init: false
+  scene_reset_interval: 1
+  randomize_robot_init: true
   
   # Motion planner settings (for RL training, disable to save time and GPU memory)
   # need_planner: false = skip CuRobo motion planner initialization (saves ~10GB VRAM)
@@ -86,9 +85,6 @@ training:
   # Dimensions
   action_dim: 32
   state_dim: 32
-  
-  # World model configuration (read from debug_test.yaml)
-  # history_length will be auto-calculated as: n_obs_img_steps + (n_obs_img_steps - 1) * obs_img_stride
   n_pred_img_steps: 1
   
   # Training parameters - adjusted for better convergence
@@ -103,39 +99,32 @@ training:
     T_max: 10000
     eta_min: 1.0e-6
   
+  num_epochs: 100
+
   # Episode settings
-  num_episodes: 10000
+  num_episodes: 2000
   steps_per_episode: 50
   batch_size: 1
   # Mini-batch size for PPO updates
-  mini_batch_size: 16
+  mini_batch_size: 2
   
   # Logging & checkpointing
   log_every: 1
-  save_every: 200
+  save_every: 10
+  video_save_every: 100
   
-  # Memory/Sequential processing
-  # F1-VLA has memory_rnn that needs sequential state propagation
-  # Set to false when memory_enabled=false in f1_config.json
-  sequential_training: true
   # BPTT (Backpropagation Through Time) sequence length for memory training
-  # Longer sequences = better memory learning, but higher memory cost and gradient issues
-  # Recommended: 4-8 for stability, up to 16 if memory is sufficient
-  bptt_length: 4
-  # Enable gradient flow through memory states (requires sequential_training=true)
-  # When true, memory GRU can learn better encodings through backprop
-  # When false, memory state is detached each step (faster but memory doesn't improve)
-  # Note: Gradients only flow WITHIN each sequence (truncated BPTT), not across sequences
+  # Longer sequences = better memory learning, but higher memory cost and gradient issues 4-8 for stability, up to 16 if memory is sufficient
+  bptt_length: 7
   memory_backprop: true
+  sequential_training: true
   
   # Action bounds
-  action_scale: 0.5  # Scale factor for action bounds (0.01-1.0)
+  action_scale: 0.3  # Scale factor for action bounds (0.01-1.0)
   action_bounds:
     low: -1.0
     high: 1.0
-  # How often to save videos (1 = every episode)
-  video_save_every: 20
-
+ 
 # =============================================================================
 # Phase 1: Teacher Training Configuration
 # =============================================================================
@@ -166,14 +155,8 @@ student:
   
   # Reward weights - adjusted based on training observations
   rewards:
-    # Memory divergence: NEW DESIGN - directly reward closeness to teacher
-    # Normalized divergence typically ranges from 0.1 to 2.0
-    # Higher weight to encourage strong memory alignment
     memory_divergence_weight: 1.0
-    # World model uncertainty: encourage exploration that surprises WM
-    # Typical range: 3.0 to 8.0
     wm_uncertainty_weight: 1.0
-    # Task success reward weight
     task_success_weight: 1.0
   
   # PPO parameters - adjusted for stability and exploration

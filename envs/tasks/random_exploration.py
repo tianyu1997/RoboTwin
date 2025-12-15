@@ -15,6 +15,7 @@ from .._base_task import Base_Task
 from ..utils import *
 from ..utils.rand_create_cluttered_actor import get_all_cluttered_objects, rand_create_cluttered_actor
 import sapien
+import sapien.physx
 import numpy as np
 import glob
 import os
@@ -69,6 +70,9 @@ class random_exploration(Base_Task):
 
     def setup_demo(self, **kwargs):
         """Initialize the task environment with randomization."""
+        # Save init kwargs for reset
+        self._init_kwargs = kwargs.copy()
+        
         # Control mode: delta_qpos, delta_ee, delta_ee_pos
         self.control_mode = kwargs.get("control_mode", "delta_qpos")
         if self.control_mode not in self.CONTROL_MODES:
@@ -118,62 +122,20 @@ class random_exploration(Base_Task):
 
     def reset_for_new_episode(self, seed: int = None):
         """
-        Reset scene for a new episode WITHOUT reloading the robot.
-        This is much faster than calling setup_demo again.
-        
-        Only resets:
-        - Objects on the table
-        - Robot position to home state
-        - Recording data
-        
-        Does NOT reload:
-        - Robot model
-        - Cameras
-        - Scene/renderer
+        Reset scene for a new episode by completely rebuilding the scene.
+        This ensures clean state and proper randomization of all elements.
         """
         if seed is not None:
             np.random.seed(seed)
-        
-        # Remove existing placed objects
-        for obj in self.placed_objects:
-            try:
-                self.scene.remove_actor(obj.entity if hasattr(obj, 'entity') else obj)
-            except:
-                pass
-        self.placed_objects = []
-        
-        # Reset prohibited area and size_dict (keep robot area)
-        self.prohibited_area = []
-        self.size_dict = []
-        
-        # Add robot prohibited area back
-        self._add_robot_prohibited_area()
-        
-        # Load new objects
-        self.load_actors()
-        
-        # Check stability
-        from envs.utils.create_actor import UnStableError
-        is_stable, unstable_list = self.check_stable()
-        if not is_stable:
-            raise UnStableError(f'Objects unstable: {", ".join(unstable_list)}')
-        
-        # Reset robot to home state
-        self.robot.move_to_homestate()
-        
-        # Open grippers
-        render_freq = self.render_freq
-        self.render_freq = 0
-        self.together_open_gripper(save_freq=-1)
-        self.render_freq = render_freq
-        
-        # Randomize initial robot position
-        self._randomize_robot_initial_state()
-        
-        # Reset tracking
-        self.executed_steps = 0
-        self.recorded_data = []
-        self.take_action_cnt = 0
+            self._init_kwargs['seed'] = seed
+            
+        # Clean up existing scene resources
+        if hasattr(self, 'scene') and self.scene is not None:
+            self.scene = None
+            
+        # Re-initialize everything using saved kwargs
+        # This will create a new scene, robot, objects, lights, etc.
+        self.setup_demo(**self._init_kwargs)
         
         return True
     
@@ -278,7 +240,7 @@ class random_exploration(Base_Task):
         # Table bounds (same as get_cluttered_table)
         xlim = [-0.35, 0.35]
         ylim = [-0.25, 0.15]
-        zlim = [0.76 + self.table_z_bias]
+        zlim = [0.745 + self.table_z_bias]  # Lowered from 0.76 to reduce drop height/bouncing
         
         # Initialize size_dict for collision tracking (same format as get_cluttered_table)
         size_dict = list(self.size_dict) if self.size_dict else []

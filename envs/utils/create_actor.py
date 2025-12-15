@@ -8,6 +8,11 @@ import os, re
 
 from .actor_utils import Actor, ArticulationActor
 
+# Define assets directory relative to this file
+# This file is in RoboTwin/envs/utils/create_actor.py
+# We want RoboTwin/assets
+ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
+
 
 class UnStableError(Exception):
 
@@ -49,7 +54,11 @@ def create_entity_box(
     if texture_id is not None:
 
         # test for both .png and .jpg
-        texturepath = f"./assets/background_texture/{texture_id}.png"
+        # texturepath = f"./assets/background_texture/{texture_id}.png"
+        
+        # Fix path to be relative to this file instead of CWD
+        texturepath = str(ASSETS_DIR / "background_texture" / f"{texture_id}.png")
+
         # create texture from file
         texture2d = sapien.render.RenderTexture2D(texturepath)
         material = sapien.render.RenderMaterial()
@@ -225,7 +234,8 @@ def create_sphere(
     if texture_id is not None:
 
         # test for both .png and .jpg
-        texturepath = f"./assets/textures/{texture_id}.png"
+        # texturepath = f"./assets/textures/{texture_id}.png"
+        texturepath = str(ASSETS_DIR / "textures" / f"{texture_id}.png")
         # create texture from file
         texture2d = sapien.render.RenderTexture2D(texturepath)
         material = sapien.render.RenderMaterial()
@@ -358,7 +368,11 @@ def create_table(
     if texture_id is not None:
 
         # test for both .png and .jpg
-        texturepath = f"./assets/background_texture/{texture_id}.png"
+        # texturepath = f"./assets/background_texture/{texture_id}.png"
+
+        # Fix path to be relative to this file instead of CWD
+        texturepath = str(ASSETS_DIR / "background_texture" / f"{texture_id}.png")
+
         # create texture from file
         texture2d = sapien.render.RenderTexture2D(texturepath)
         material = sapien.render.RenderMaterial()
@@ -406,7 +420,7 @@ def create_obj(
     scene_orig = scene
     scene, pose = preprocess(scene_orig, pose)
 
-    modeldir = Path("assets/objects") / modelname
+    modeldir = ASSETS_DIR / "objects" / modelname
     if model_id is None:
         file_name = modeldir / "textured.obj"
         json_file_path = modeldir / "model_data.json"
@@ -453,7 +467,7 @@ def create_glb(
 ) -> Actor:
     scene, pose = preprocess(scene, pose)
 
-    modeldir = Path("./assets/objects") / modelname
+    modeldir = ASSETS_DIR / "objects" / modelname
     if model_id is None:
         file_name = modeldir / "base.glb"
         json_file_path = modeldir / "model_data.json"
@@ -515,7 +529,7 @@ def create_actor(
 ) -> Actor:
     scene_orig = scene
     scene, pose = preprocess(scene_orig, pose)
-    modeldir = Path("assets/objects") / modelname
+    modeldir = ASSETS_DIR / "objects" / modelname
 
     if model_id is None:
         json_file_path = modeldir / "model_data.json"
@@ -573,7 +587,7 @@ def create_actor(
 def create_urdf_obj(scene, pose: sapien.Pose, modelname: str, scale=1.0, fix_root_link=True) -> ArticulationActor:
     scene, pose = preprocess(scene, pose)
 
-    modeldir = Path("./assets/objects") / modelname
+    modeldir = ASSETS_DIR / "objects" / modelname
     json_file_path = modeldir / "model_data.json"
     loader: sapien.URDFLoader = scene.create_urdf_loader()
     loader.scale = scale

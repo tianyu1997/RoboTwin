@@ -35,6 +35,49 @@ from omegaconf import OmegaConf, DictConfig
 logger = logging.getLogger(__name__)
 
 
+def resolve_device_and_process(accelerator, rl_config, args) -> tuple[str, bool]:
+    """Resolve device string and whether this is main process.
+
+    This centralizes the logic used across training scripts to decide the device
+    and main-process flag for logging and behavior.
+    """
+    if accelerator is not None:
+        device = str(accelerator.device)
+        is_main = accelerator.is_main_process
+    else:
+        device = rl_config.get("device", "cuda:0")
+        if device == "cuda":
+            device = "cuda:0"
+        is_main = True
+    return device, is_main
+
+
+def print_startup_header(phase_name: str, device: str, is_main_process: bool, *, use_ddp: bool = False, num_processes: int | None = None, extra: dict | None = None) -> None:
+    """Print a concise startup header similar to `train_teacher_rl.py`.
+
+    - `phase_name`: human readable phase title
+    - `device`: device string (e.g. `cuda:0`)
+    - `is_main_process`: whether to print (only main process should print)
+    - `use_ddp`: whether DDP was requested
+    - `num_processes`: number of processes (if available)
+    - `extra`: dict of additional key/value pairs to print
+    """
+    if not is_main_process:
+        return
+
+    print("\n" + "=" * 60)
+    print(phase_name)
+    print("=" * 60)
+    if use_ddp and num_processes is not None:
+        print(f"Distributed training: {num_processes} processes")
+    print(f"Device: {device}")
+    print(f"Using DDP: {use_ddp}")
+    if extra:
+        for k, v in extra.items():
+            print(f"{k}: {v}")
+    print("=" * 60)
+
+
 # =============================================================================
 # GPU Assignment for SAPIEN Rendering
 # =============================================================================
@@ -190,10 +233,11 @@ class LoRAConfig:
     """LoRA configuration."""
     r: int = 8
     lora_alpha: int = 32
-    target_modules: List[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
+    target_modules: Union[List[str], str] = field(default_factory=lambda: ["q_proj", "v_proj"])
     lora_dropout: float = 0.1
     bias: str = "none"
     task_type: str = "CAUSAL_LM"
+    modules_to_save: Optional[List[str]] = None
 
 
 @dataclass
@@ -211,7 +255,7 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
     gradient_accumulation_steps: int = 4
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5  # Reduced from 1.0 for stability
     
     # Episode settings
     num_episodes: int = 10000
@@ -296,7 +340,7 @@ def get_training_config(config: DictConfig) -> TrainingConfig:
         learning_rate=train_cfg.get("learning_rate", 1e-4),
         weight_decay=train_cfg.get("weight_decay", 1e-4),
         gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 4),
-        max_grad_norm=train_cfg.get("max_grad_norm", 1.0),
+        max_grad_norm=train_cfg.get("max_grad_norm", 0.5),
         num_episodes=train_cfg.get("num_episodes", 10000),
         steps_per_episode=train_cfg.get("steps_per_episode", 50),
         batch_size=train_cfg.get("batch_size", 8),
@@ -308,6 +352,22 @@ def get_training_config(config: DictConfig) -> TrainingConfig:
         action_bounds_low=train_cfg.get("action_bounds", {}).get("low", -1.0),
         action_bounds_high=train_cfg.get("action_bounds", {}).get("high", 1.0),
     )
+
+
+def adjust_config_for_ddp(config: TrainingConfig, accelerator) -> None:
+    """
+    Adjust training configuration for distributed training.
+    
+    Specifically, divides num_episodes by the number of processes so that
+    the total number of episodes across all processes matches the config.
+    """
+    if accelerator and accelerator.is_distributed:
+        original_episodes = config.num_episodes
+        config.num_episodes = max(1, config.num_episodes // accelerator.num_processes)
+        
+        if accelerator.is_main_process:
+            logger.info(f"Distributed Training: Adjusted num_episodes from {original_episodes} (Global) to {config.num_episodes} (Per-Process)")
+
 
 
 def get_f1_flow_matching_model(policy):
@@ -382,7 +442,47 @@ def set_policy_requires_grad(
         train_state_proj=not train_gen_expert_only,  # Freeze state_proj when training gen expert only
     )
     model.set_requires_grad(training_args)
-
+    
+    # --- Comprehensive Verification & Logging ---
+    logger.info("--- Verifying Trainable Parameters ---")
+    
+    # Use policy.named_parameters() to catch everything including LoRA wrappers
+    trainable_params = [n for n, p in policy.named_parameters() if p.requires_grad]
+    
+    # 1. Vision Encoder
+    vision_params = [n for n in trainable_params if "vision_tower" in n]
+    if freeze_vision_encoder and vision_params:
+        logger.warning(f"⚠️  WARNING: Vision encoder has {len(vision_params)} trainable params! (Expected 0)")
+        logger.warning(f"   Examples: {vision_params[:3]}")
+    elif freeze_vision_encoder:
+        logger.info("✅ Vision encoder is frozen.")
+    else:
+        logger.warning(f"ℹ️  WARNING: Vision encoder has {len(vision_params)} trainable params!")
+        
+    # 2. Base LLM
+    # Assuming structure: ...paligemma.language_model...
+    if (base_llm_params := [n for n in trainable_params if "paligemma.language_model" in n]):
+         logger.warning(f"⚠️  WARNING: Base LLM has {len(base_llm_params)} trainable params! (Expected 0)")
+         logger.warning(f"   Examples: {base_llm_params[:3]}")
+    else:
+         logger.info("✅ Base LLM is frozen.")
+         
+    if action_expert_params := [n for n in trainable_params if "gemma_expert" in n]:
+        logger.info(f"ℹ️  Action Expert: {len(action_expert_params)} trainable params.")
+    else:
+        logger.info("ℹ️  Action Expert is frozen.")
+    
+    if wm_expert_params := [n for n in trainable_params if "gemma_wm_expert" in n]:
+        logger.info(f"ℹ️  World Model: {len(wm_expert_params)} trainable params.")
+    else:
+        logger.info("ℹ️   World Model is frozen.")
+    
+    # 3. Memory Modules
+    if memory_params := [n for n in trainable_params if "memory" in n]:
+        logger.info(f"✅ Memory modules: {len(memory_params)} trainable params.")
+        logger.info(f"   Examples: {memory_params}")
+    else:
+        logger.warning("⚠️  WARNING: No memory parameters are trainable! Check modules_to_save.")
 
 def get_environment_config(config: DictConfig, num_steps: Optional[int] = None) -> Dict[str, Any]:
     """
@@ -505,7 +605,7 @@ def load_f1_policy(
     
     from f1_vla.src.models.configuration_f1 import F1Config
     from f1_vla.src.policies.f1_policy import F1_VLA
-    from f1_vla.src.utils.utils import load_ckpt, set_policy_config, unfreeze_memory_params
+    from f1_vla.src.utils.utils import load_ckpt, set_policy_config
     
     # Load config from YAML if string
     if isinstance(config_file, (str, Path)):
@@ -566,9 +666,12 @@ def load_f1_policy(
                 lora_dropout=lora_config.lora_dropout,
                 bias=lora_config.bias,
                 task_type=lora_config.task_type,
+                modules_to_save=lora_config.modules_to_save,
             )
             policy = get_peft_model(policy, peft_config)
             logger.debug("Applied LoRA configuration")
+            
+           
         
         # Load additional checkpoint if specified (AFTER LoRA is applied)
         if checkpoint_path and os.path.exists(checkpoint_path):
@@ -584,15 +687,73 @@ def load_f1_policy(
                 if pt_file.exists():
                     _print(f"  Loading RL checkpoint (model.pt)")
                     state_dict = torch.load(pt_file, map_location="cpu", weights_only=False)
+                    
+                    # --- Smart Key Adaptation ---
+                    model_keys = set(policy.state_dict().keys())
+                    ckpt_keys = set(state_dict.keys())
+                    
+                    # Case 1: Model expects 'base_model.model.' prefix (PEFT), but checkpoint lacks it
+                    if any(k.startswith('base_model.model.') for k in model_keys) and \
+                       not any(k.startswith('base_model.model.') for k in ckpt_keys):
+                        new_state_dict = OrderedDict()
+                        for k, v in state_dict.items():
+                            # Try adding prefix
+                            new_key = f"base_model.model.{k}"
+                            if new_key in model_keys:
+                                new_state_dict[new_key] = v
+                            else:
+                                # Keep original if prefix doesn't help (or maybe it's a different key)
+                                new_state_dict[k] = v
+                        state_dict = new_state_dict
+                        _print("  Adapted checkpoint keys: added 'base_model.model.' prefix")
+
+                    # Case 2: Checkpoint has 'base_model.model.' prefix, but model doesn't (unwrapped)
+                    elif not any(k.startswith('base_model.model.') for k in model_keys) and \
+                         any(k.startswith('base_model.model.') for k in ckpt_keys):
+                        new_state_dict = OrderedDict()
+                        for k, v in state_dict.items():
+                            if k.startswith('base_model.model.'):
+                                new_key = k.replace('base_model.model.', '')
+                                if new_key in model_keys:
+                                    new_state_dict[new_key] = v
+                                else:
+                                    new_state_dict[k] = v
+                            else:
+                                new_state_dict[k] = v
+                        state_dict = new_state_dict
+                        _print("  Adapted checkpoint keys: removed 'base_model.model.' prefix")
+                    # -----------------------------
+
                     # Load with strict=False to handle potential mismatches
                     missing, unexpected = policy.load_state_dict(state_dict, strict=False)
+                    
+                    # --- Filter Missing Keys (Frozen Params) ---
                     if missing:
-                        _print(f"  Warning: Missing keys: {len(missing)}")
-                        logger.debug(f"Missing keys: {missing[:5]}...")
+                        real_missing = []
+                        frozen_missing = []
+                        # Get map of param names to requires_grad
+                        param_grad_status = {n: p.requires_grad for n, p in policy.named_parameters()}
+                        
+                        for k in missing:
+                            # If key is in model and is frozen, we can ignore it being missing from checkpoint
+                            # (assuming it was loaded from pretrained base)
+                            if k in param_grad_status and not param_grad_status[k]:
+                                frozen_missing.append(k)
+                            else:
+                                real_missing.append(k)
+                        
+                        if frozen_missing:
+                            _print(f"  Ignored {len(frozen_missing)} missing keys (frozen parameters)")
+                            missing = real_missing
+                    # -------------------------------------------
+
+                    # Print concise informational counts to avoid alarming messages in normal cases
+                    _print(f"  RL checkpoint loaded (missing_keys={len(missing)}, unexpected_keys={len(unexpected)})")
+                    # Log detailed lists at DEBUG level only
+                    if missing:
+                        logger.info(f"Missing keys ({len(missing)}): {missing}")
                     if unexpected:
-                        _print(f"  Warning: Unexpected keys: {len(unexpected)}")
-                        logger.debug(f"Unexpected keys: {unexpected[:5]}...")
-                    _print(f"  RL checkpoint loaded successfully")
+                        logger.info(f"Unexpected keys ({len(unexpected)}): {unexpected}")
                 elif safetensors_file.exists():
                     load_config = OmegaConf.create({"exp": {"load_ckpt": str(checkpoint_path)}})
                     policy = load_ckpt(policy, load_config)
@@ -612,10 +773,6 @@ def load_f1_policy(
             else:
                 load_config = OmegaConf.create({"exp": {"load_ckpt": str(checkpoint_path)}})
                 policy = load_ckpt(policy, load_config)
-        
-        # Unfreeze memory-related parameters
-        unfrozen = unfreeze_memory_params(policy)
-        _print(f"  Unfrozen {len(unfrozen)} memory parameters")
     
     # Move to device
     _print(f"  Moving model to {device}...")
@@ -635,6 +792,7 @@ def get_lora_config_from_dict(config: DictConfig) -> LoRAConfig:
         lora_dropout=lora_cfg.get("lora_dropout", 0.1),
         bias=lora_cfg.get("bias", "none"),
         task_type=lora_cfg.get("task_type", "CAUSAL_LM"),
+        modules_to_save=lora_cfg.get("modules_to_save", None),
     )
 
 
@@ -924,6 +1082,10 @@ class BaseRLTrainer(ABC):
         self.config = config
         self.device = device
         self.accelerator = accelerator
+        
+        # Adjust config for DDP (Global -> Per-Process episodes)
+        adjust_config_for_ddp(self.config, self.accelerator)
+        
         self.output_dir = Path(output_dir)
         if self._is_main_process():
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -968,6 +1130,36 @@ class BaseRLTrainer(ABC):
         """Print only on main process."""
         if self._is_main_process():
             print(msg)
+
+    def add_video(self, tag: str, frames, step: int, fps: int = 10) -> None:
+        """Add a video to the trainer's SummaryWriter (no-op if writer is None)."""
+        try:
+            if self.writer is None:
+                return
+            add_video_to_writer(self.writer, tag, frames, step, fps=fps)
+        except Exception:
+            logger.exception("Failed to add video via trainer.add_video")
+
+    def add_image(self, tag: str, image, step: int) -> None:
+        """Add an image to the trainer's SummaryWriter (no-op if writer is None)."""
+        try:
+            if self.writer is None:
+                return
+            import torch as _torch
+            import numpy as _np
+
+            img = image
+            if isinstance(img, _np.ndarray):
+                img = _torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(dtype=_torch.float32) / 255.0
+            elif isinstance(img, _torch.Tensor):
+                if img.ndim == 3:
+                    img = img.unsqueeze(0)
+                # expect [N, C, H, W]
+            else:
+                return
+            self.writer.add_images(tag, img, global_step=step)
+        except Exception:
+            logger.exception("Failed to add image via trainer.add_image")
     
     def _init_memory_state(self, batch_size: int = 1) -> torch.Tensor:
         """
@@ -1120,7 +1312,7 @@ class BaseRLTrainer(ABC):
         model_path = checkpoint_path / "model.pt"
         if model_path.exists():
             try:
-                state_dict = torch.load(model_path, map_location=self.device)
+                state_dict = torch.load(model_path, map_location=self.device, weights_only=False)
                 policy.load_state_dict(state_dict, strict=False)
                 logger.info("Loaded model weights from model.pt")
             except Exception as e:
@@ -1141,7 +1333,7 @@ class BaseRLTrainer(ABC):
         start_step = 0
         if trainer_state_path.exists():
             try:
-                state = torch.load(trainer_state_path, map_location=self.device)
+                state = torch.load(trainer_state_path, map_location=self.device, weights_only=False)
                 
                 # Restore optimizer state
                 if self.optimizer is not None and "optimizer" in state:
@@ -1249,6 +1441,60 @@ def setup_optimizer(
     """Setup AdamW optimizer with trainable parameters."""
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
+
+
+def create_summary_writer(output_dir: Union[str, Path], is_main_process: bool = True) -> Optional[SummaryWriter]:
+    """
+    Create a TensorBoard SummaryWriter under `output_dir/tensorboard`.
+
+    Returns `None` for non-main processes to avoid duplicate logging in DDP.
+    """
+    if not is_main_process:
+        return None
+    out = Path(output_dir)
+    tb_dir = out / "tensorboard"
+    tb_dir.mkdir(parents=True, exist_ok=True)
+    return SummaryWriter(tb_dir)
+
+
+def add_video_to_writer(writer: Optional[SummaryWriter], tag: str, frames: Union[List, np.ndarray], step: int, fps: int = 10) -> None:
+    """
+    Add a video to TensorBoard `writer`.
+
+    Args:
+        writer: SummaryWriter or None
+        tag: tag/name for the video
+        frames: list or numpy array with shape (T, H, W, C) or (N, T, C, H, W)
+        step: global step or episode index
+        fps: frames per second
+    """
+    if writer is None:
+        return
+    try:
+        import numpy as _np
+        import torch as _torch
+
+        arr = frames
+        if isinstance(arr, list):
+            arr = _np.stack(arr, axis=0)
+
+        # arr expected: (T, H, W, C) -> convert to (N, T, C, H, W) with N=1
+        if arr.ndim == 4:
+            # (T, H, W, C)
+            arr = arr.transpose(0, 3, 1, 2)  # T, C, H, W
+            arr = _np.expand_dims(arr, axis=0)  # 1, T, C, H, W
+        elif arr.ndim == 5:
+            # assume already (N, T, C, H, W)
+            pass
+        else:
+            # Unsupported shape
+            return
+
+        # Convert to torch tensor in [0,1] float
+        vid = _torch.from_numpy(arr).to(dtype=_torch.float32) / 255.0
+        writer.add_video(tag, vid, global_step=step, fps=fps)
+    except Exception:
+        logger.exception("Failed to add video to SummaryWriter")
 
 
 def setup_scheduler(

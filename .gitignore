@@ -31,3 +31,4 @@ envs/curobo/*
 data/*
 logs/*
 outputs/*
+rl/data/*

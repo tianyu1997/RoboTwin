@@ -29,34 +29,13 @@ from typing import Dict, Tuple, Optional, Any
 
 def setup_normalizer_logger(log_dir: str = "logs/normalizer") -> logging.Logger:
     """Setup logger for normalizer module."""
-    os.makedirs(log_dir, exist_ok=True)
+    # os.makedirs(log_dir, exist_ok=True)
     
     logger = logging.getLogger("normalizer")
     if logger.handlers:  # Already configured
         return logger
         
-    logger.setLevel(logging.DEBUG)
-    
-    # File handler with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_handler = logging.FileHandler(
-        os.path.join(log_dir, f"normalizer_{timestamp}.log")
-    )
-    file_handler.setLevel(logging.DEBUG)
-    
-    # Console handler (INFO level only)
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
-    
-    # Formatter
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    logger.setLevel(logging.CRITICAL + 1)  # Disable logging
     
     return logger
 

@@ -53,7 +53,7 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 import argparse
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 from collections import deque
 import copy
 from tqdm import tqdm
@@ -62,7 +62,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 
 # Set CUDA device immediately to avoid NCCL warnings/hangs
 if torch.cuda.is_available():
@@ -92,6 +92,8 @@ from rl.training.rl_training_common import (
     count_trainable_params,
     setup_logging_from_config,
     set_policy_requires_grad,
+    resolve_device_and_process,
+    print_startup_header,
 )
 
 # Import parallel training utilities
@@ -195,9 +197,11 @@ class StudentTrainer(BaseRLTrainer):
             import yaml
             with open(model_config, 'r') as f:
                 model_cfg = yaml.safe_load(f)
+            model_config_desc = str(model_config)
         else:
             # Assume DictConfig or dict
             model_cfg = OmegaConf.to_container(model_config, resolve=True)
+            model_config_desc = f"inline config ({type(model_config).__name__})"
         
         train_datasets = model_cfg.get('dataset', {}).get('train_dir', {})
         if not train_datasets:
@@ -224,12 +228,14 @@ class StudentTrainer(BaseRLTrainer):
             accelerator=accelerator,  # Pass accelerator to base class
         )
         
+        # Note: train_config.num_episodes is automatically adjusted for DDP in BaseRLTrainer.__init__
+        
         self.student_policy = student_policy
         self.teacher_policy = teacher_policy
         self.policy_config = policy_config
         self.rl_config = rl_config
         
-        print(f"Student policy config from {model_config_file}:")
+        print(f"Student policy config from {model_config_desc}:")
         print(f"  n_obs_img_steps: {self.n_obs_img_steps}")
         print(f"  n_pred_img_steps: {self.n_pred_img_steps}")
         print(f"  history_length: {train_config.history_length}")
@@ -246,14 +252,16 @@ class StudentTrainer(BaseRLTrainer):
         
         # Reward weights
         rewards_config = student_config.get("rewards", {})
-        self.memory_divergence_weight = rewards_config.get("memory_divergence_weight", 0.5)
-        self.wm_uncertainty_weight = rewards_config.get("wm_uncertainty_weight", 0.5)
+        # Increase memory divergence weight to prioritize teacher imitation
+        self.memory_divergence_weight = rewards_config.get("memory_divergence_weight", 1.0)
+        # Decrease WM uncertainty weight to prevent it from dominating the reward
+        self.wm_uncertainty_weight = rewards_config.get("wm_uncertainty_weight", 0.01)
         
         # PPO parameters - adjusted for stability
         ppo_config = student_config.get("ppo", {})
         self.ppo_config = ppo_config  # Store for later use
         self.clip_epsilon = ppo_config.get("clip_epsilon", 0.1)  # Reduced from 0.2 for stability
-        self.entropy_coef = ppo_config.get("entropy_coef", 0.02)  # Increased from 0.01 for more exploration
+        self.entropy_coef = ppo_config.get("entropy_coef", 0.05)  # Increased to 0.05 for more exploration
         self.value_loss_coef = ppo_config.get("value_loss_coef", 0.5)
         self.gamma = ppo_config.get("gamma", 0.99)
         self.gae_lambda = ppo_config.get("gae_lambda", 0.95)
@@ -262,7 +270,8 @@ class StudentTrainer(BaseRLTrainer):
         # state_proj outputs [B, proj_width] where proj_width=1024 typically
         proj_width = policy_config.proj_width if hasattr(policy_config, 'proj_width') else 1024
         self.value_head = nn.Linear(proj_width, 1).to(device)
-        self.log_std = nn.Parameter(torch.zeros(train_config.action_dim, device=device))
+        # Initialize log std to a small value to stabilize early training
+        self.log_std = nn.Parameter(torch.ones(train_config.action_dim, device=device) * -2.0)
         
         # Setup student policy for training - train action expert only
         # Note: unwrap DDP model for training setup, but use wrapped model for forward
@@ -292,7 +301,8 @@ class StudentTrainer(BaseRLTrainer):
         
         self.optimizer = torch.optim.AdamW(
             param_groups,
-            lr=train_config.learning_rate,
+            # Reduce LR for stability (scale down by 10x from training config)
+            lr=max(1e-8, float(train_config.learning_rate) * 0.1),
             weight_decay=train_config.weight_decay,
         )
         self.scheduler = setup_scheduler(
@@ -351,6 +361,16 @@ class StudentTrainer(BaseRLTrainer):
             "wm_uncertainty": deque(maxlen=100),
             "episode_reward": deque(maxlen=100),
         })
+        # Video recording buffers (for on-disk MP4 saving and TB)
+        self.video_frames_head = []   # Head camera frames (HWC uint8)
+        self.video_frames_wrist = []  # Wrist camera frames (HWC uint8)
+        self.video_transitions = []   # Store transitions for prediction
+
+        # Video save frequency (episodes)
+        train_cfg = rl_config.get("training", {})
+        self.video_save_every = int(train_cfg.get("video_save_every", 1))
+        if self._is_main_process():
+            (Path(self.output_dir) / "videos").mkdir(parents=True, exist_ok=True)
     
     def load_checkpoint(self, checkpoint_dir: str) -> int:
         """
@@ -508,8 +528,6 @@ class StudentTrainer(BaseRLTrainer):
         
         # Use tqdm for steps if requested
         pbar = None
-        if use_tqdm:
-            pbar = tqdm(total=self.config.steps_per_episode, desc="Episode Steps", leave=False)
         
         while not done:
             # Build batch for student policy
@@ -542,6 +560,13 @@ class StudentTrainer(BaseRLTrainer):
             # Execute action
             next_obs, env_reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
+
+            # Collect frames for video recording
+            try:
+                if self._is_main_process():
+                    self._collect_video_frame(obs, action)
+            except Exception:
+                logger.exception("Failed to collect video frame during episode collection")
             
             # Compute custom reward (pass wm_logits from student model)
             reward, reward_info = self._compute_custom_reward(obs, batch, wm_logits=wm_logits)
@@ -554,14 +579,7 @@ class StudentTrainer(BaseRLTrainer):
                     "mem_div": f"{reward_info.get('memory_divergence_abs', 0):.2f}"
                 })
             
-            # Log reward components every 50 steps to reduce verbosity
-            if step % 50 == 0 and not use_tqdm:
-                logger.debug(f"[collect_episode] Step {step} - Reward components:")
-                logger.debug(f"  Env reward: {env_reward:.4f}")
-                logger.debug(f"  Custom reward: {reward:.4f}")
-                logger.debug(f"  Memory div reward: {reward_info.get('memory_divergence', 0):.4f}")
-                logger.debug(f"  Memory div abs: {reward_info.get('memory_divergence_abs', 0):.4f}")
-                logger.debug(f"  WM uncertainty: {reward_info.get('wm_uncertainty', 0):.4f}")
+    
             
             transitions.append({
                 "obs": obs,
@@ -572,6 +590,8 @@ class StudentTrainer(BaseRLTrainer):
                 "next_obs": next_obs,
                 "done": done,
                 "info": {**info, **reward_info},
+                # include initial memory state used for this step (may be None)
+                "initial_memory_state": batch.get("initial_memory_state"),
             })
             
             obs = next_obs
@@ -584,6 +604,232 @@ class StudentTrainer(BaseRLTrainer):
         self._compute_advantages(transitions)
         
         return transitions
+
+    def _process_obs_image(self, img: np.ndarray) -> Optional[np.ndarray]:
+        """Convert observation image to HWC uint8 format."""
+        import numpy as _np
+        if img is None:
+            return None
+        if not isinstance(img, _np.ndarray):
+            img = _np.array(img)
+
+        # If stacked history (T, C, H, W) take last
+        if img.ndim == 4:
+            img = img[-1]
+
+        # If CHW -> HWC
+        if img.ndim == 3 and img.shape[0] == 3:
+            img = _np.transpose(img, (1, 2, 0))
+
+        if img.ndim != 3:
+            logger.warning(f"Unexpected image dims: {getattr(img, 'ndim', None)}")
+            return None
+
+        # Ensure uint8
+        if img.dtype != _np.uint8:
+            if img.max() <= 1.0:
+                img = (img * 255.0).astype(_np.uint8)
+            else:
+                img = img.astype(_np.uint8)
+
+        return img
+
+    def _collect_video_frame(self, obs: Dict[str, np.ndarray], action: Any = None):
+        """Collect frames and transition for later MP4 generation.
+
+        Mirrors teacher implementation but simplified for student (head may be absent).
+        """
+        if not self._is_main_process():
+            return
+
+        # Head frame
+        head_img = obs.get("head_rgb")
+        head_frame = None
+        if head_img is not None:
+            head_frame = self._process_obs_image(head_img)
+        if head_frame is not None:
+            self.video_frames_head.append(head_frame.copy())
+        else:
+            # Keep alignment with wrist frames
+            self.video_frames_head.append(None)
+
+        # Wrist frame
+        wrist_img = obs.get("wrist_rgb")
+        wrist_frame = None
+        if wrist_img is not None:
+            wrist_frame = self._process_obs_image(wrist_img)
+        if wrist_frame is not None:
+            self.video_frames_wrist.append(wrist_frame.copy())
+        else:
+            self.video_frames_wrist.append(None)
+
+        # Store transition (limit length to avoid memory blowup)
+        if len(self.video_transitions) < 200:
+            self.video_transitions.append({
+                "obs": {k: (v.copy() if hasattr(v, 'copy') else v) for k, v in obs.items()},
+                "action": (action.copy() if hasattr(action, 'copy') else action),
+            })
+
+    def _save_episode_video(self, episode: int):
+        """Save a combined MP4 for the episode: [Head | GT Wrist | Predicted Wrist]."""
+        if not self._is_main_process():
+            return
+
+        if not self.video_transitions or len(self.video_transitions) < self.n_obs_img_steps + 1:
+            logger.warning(f"Not enough frames for video (need {self.n_obs_img_steps + 1}, got {len(self.video_transitions)})")
+            # Clear buffers
+            self.video_frames_head = []
+            self.video_frames_wrist = []
+            self.video_transitions = []
+            return
+
+        try:
+            video_path = Path(self.output_dir) / "videos" / f"episode_{episode:06d}.mp4"
+
+            # Prepare writer
+            import imageio
+            import cv2
+            import numpy as _np
+
+            tb_frames = []
+
+            start_idx = self.n_obs_img_steps - 1
+            memory_state = None
+
+            # Get unwrapped teacher policy if available for prediction
+            teacher_policy = None
+            try:
+                teacher_policy = self.accelerator.unwrap_model(self.teacher_policy) if self.accelerator else self.teacher_policy
+                teacher_policy.eval()
+            except Exception:
+                teacher_policy = None
+
+            for i in range(start_idx, len(self.video_transitions) - 1):
+                trans = self.video_transitions[i]
+                next_trans = self.video_transitions[i + 1]
+
+                obs = trans["obs"]
+                next_obs = next_trans["obs"]
+
+                # Head panel
+                head_frame = None
+                if i < len(self.video_frames_head):
+                    head_frame = self.video_frames_head[i]
+                if head_frame is None:
+                    # white placeholder
+                    if self.video_frames_wrist and self.video_frames_wrist[0] is not None:
+                        h, w = self.video_frames_wrist[0].shape[:2]
+                    else:
+                        h, w = 256, 256
+                    head_frame = _np.ones((h, w, 3), dtype=_np.uint8) * 255
+
+                # GT wrist from next_obs
+                gt_wrist = next_obs.get("wrist_rgb")
+                if gt_wrist is None:
+                    continue
+                if getattr(gt_wrist, 'ndim', 3) == 4:
+                    gt_wrist = gt_wrist[-1]
+                gt_frame = self._process_obs_image(gt_wrist)
+                if gt_frame is None:
+                    continue
+
+                # Prediction using teacher_policy if available
+                pred_frame = None
+                try:
+                    if teacher_policy is not None:
+                        # Build batch using env helper if present
+                        if hasattr(self.env, '_build_policy_batch'):
+                            batch = self.env._build_policy_batch(obs, np.array(trans.get('action', 0), dtype=np.float32), use_head_camera=True)
+                        else:
+                            # Fallback: create minimal batch
+                            batch = {
+                                "observation.state": torch.from_numpy(obs.get('state')).float().unsqueeze(0).to(self.device),
+                            }
+
+                        if memory_state is None:
+                            memory_state = self._init_memory_state(batch_size=1)
+                        batch["initial_memory_state"] = memory_state
+
+                        with torch.no_grad():
+                            pred_out = teacher_policy.predict_images_only(batch)
+                        memory_state = pred_out.get("memory_state")
+                        pred_imgs = pred_out.get("pred_imgs")
+                        if pred_imgs is not None:
+                            pred = pred_imgs.detach().cpu()
+                            if pred.ndim == 5:
+                                pred = pred[:, -1]
+                            pred = pred[0]
+                            pred_np = ((pred + 1.0) / 2.0).clamp(0.0, 1.0).numpy()
+                            pred_frame = (np.transpose(pred_np, (1, 2, 0)) * 255.0).astype(_np.uint8)
+                            # Resize to GT size
+                            if pred_frame.shape[:2] != gt_frame.shape[:2]:
+                                pred_frame = cv2.resize(pred_frame, (gt_frame.shape[1], gt_frame.shape[0]))
+                except Exception:
+                    logger.debug("Prediction failed for video generation")
+
+                if pred_frame is None:
+                    pred_frame = gt_frame.copy()
+
+                # Compose combined frame
+                gap = 5
+                label_h = 25
+                h, w = gt_frame.shape[:2]
+                raw_w = w * 3 + gap * 2
+                raw_h = h + label_h
+                combined_w = ((raw_w + 15) // 16) * 16
+                combined_h = ((raw_h + 15) // 16) * 16
+                pad_x = (combined_w - raw_w) // 2
+                pad_y = (combined_h - raw_h) // 2
+
+                combined = _np.ones((combined_h, combined_w, 3), dtype=_np.uint8) * 255
+                x_offset = pad_x
+                y_offset = pad_y
+
+                # Head
+                hf = head_frame
+                if hf.shape[:2] != (h, w):
+                    hf = cv2.resize(hf, (w, h))
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = hf
+                x_offset += w + gap
+
+                # GT
+                gf = gt_frame
+                if gf.shape[:2] != (h, w):
+                    gf = cv2.resize(gf, (w, h))
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = gf
+                x_offset += w + gap
+
+                # Pred
+                pf = pred_frame
+                if pf.shape[:2] != (h, w):
+                    pf = cv2.resize(pf, (w, h))
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = pf
+
+                tb_frames.append(combined)
+
+            # Write mp4
+            writer = imageio.get_writer(str(video_path), fps=10, codec='libx264', pixelformat='yuv420p', quality=8)
+            for f in tb_frames:
+                writer.append_data(f)
+            writer.close()
+
+            # Also add to TensorBoard
+            try:
+                if self.writer is not None and tb_frames:
+                    from rl.training.rl_training_common import add_video_to_writer
+                    add_video_to_writer(self.writer, f"video/episode_{episode:06d}", tb_frames, episode, fps=10)
+            except Exception:
+                logger.exception("Failed to add episode video to TensorBoard")
+
+            logger.info(f"[Video] Saved student episode video: {video_path}")
+
+        except Exception:
+            logger.exception("Error saving combined video for student")
+        finally:
+            # Clear buffers
+            self.video_frames_head = []
+            self.video_frames_wrist = []
+            self.video_transitions = []
     
     def _obs_to_batch(self, obs: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
         """Convert observation dict to batch tensor dict.
@@ -837,7 +1083,7 @@ class StudentTrainer(BaseRLTrainer):
                 # 1. Progress reward: -(current - prev), positive when getting closer
                 # 2. Proximity penalty: penalize being far away
                 progress_reward = -(current_divergence - self.prev_memory_divergence)
-                proximity_penalty = -0.001 * current_divergence  # Penalize absolute distance
+                proximity_penalty = -0.07 * current_divergence  # Penalize absolute distance (increased for stronger guidance)
                 memory_divergence_reward = progress_reward + proximity_penalty
                 
                 # Log detailed information every 50 steps to reduce verbosity
@@ -933,6 +1179,14 @@ class StudentTrainer(BaseRLTrainer):
                 mb_batch["observation.images.image0_history"] = batch["observation.images.image0_history"][mb_indices]
                 mb_batch["observation.images.image0"] = batch["observation.images.image0"][mb_indices]
                 mb_batch["observation.images.image0_mask"] = batch["observation.images.image0_mask"][mb_indices]
+            # Slice initial memory state for mini-batch if present
+            if "initial_memory_state" in batch:
+                try:
+                    # batch["initial_memory_state"] shape: (num_layers, batch_size, hidden)
+                    mb_batch["initial_memory_state"] = batch["initial_memory_state"][:, mb_indices, :]
+                except Exception:
+                    # Fallback: initialize zeros for mini-batch
+                    mb_batch["initial_memory_state"] = self._init_memory_state(batch_size=mb_batch["observation.state"].shape[0])
             
             self.optimizer.zero_grad()
             
@@ -956,7 +1210,7 @@ class StudentTrainer(BaseRLTrainer):
             surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * mb_advantages
             policy_loss = -torch.min(surr1, surr2).mean()
             
-            # Value loss with optional clipping
+            # Value loss with optional clipping — use Smooth L1 (Huber) for robustness
             clip_value = getattr(self.ppo_config, 'clip_value_loss', True)
             if clip_value:
                 # Get old values from batch
@@ -964,11 +1218,11 @@ class StudentTrainer(BaseRLTrainer):
                 values_clipped = mb_old_values + torch.clamp(
                     values - mb_old_values, -self.clip_epsilon, self.clip_epsilon
                 )
-                value_loss_unclipped = F.mse_loss(values, mb_returns, reduction='none')
-                value_loss_clipped = F.mse_loss(values_clipped, mb_returns, reduction='none')
+                value_loss_unclipped = F.smooth_l1_loss(values, mb_returns, reduction='none')
+                value_loss_clipped = F.smooth_l1_loss(values_clipped, mb_returns, reduction='none')
                 value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
             else:
-                value_loss = F.mse_loss(values, mb_returns)
+                value_loss = F.smooth_l1_loss(values, mb_returns)
             
             # Entropy bonus
             std = torch.exp(self.log_std)
@@ -989,6 +1243,9 @@ class StudentTrainer(BaseRLTrainer):
             total_entropy += entropy.item()
             total_loss += loss.item()
             num_mini_batches += 1
+            # Diagnostic: warn on extremely large losses to help debugging
+            if abs(policy_loss.item()) > 1e6 or abs(value_loss.item()) > 1e5:
+                logger.warning(f"Large loss detected: policy_loss={policy_loss.item():.3e}, value_loss={value_loss.item():.3e}, episode={getattr(self, 'metrics',{}).get('episode', 'N/A')}")
         
         return {
             "policy_loss": total_policy_loss / num_mini_batches,
@@ -1025,6 +1282,54 @@ class StudentTrainer(BaseRLTrainer):
             
             # Collect episode
             transitions = self.collect_episode(use_tqdm=is_main_process)
+
+            # Log a sample wrist frame to TensorBoard (main process only)
+            if is_main_process:
+                try:
+                    if self.writer is not None and transitions and "wrist_rgb" in transitions[0]["obs"]:
+                        import numpy as _np
+                        wrist = transitions[0]["obs"]["wrist_rgb"]
+                        # wrist may be [T, C, H, W] or [C, H, W]
+                        if hasattr(wrist, 'ndim') and wrist.ndim == 4:
+                            frame = wrist[-1]
+                        else:
+                            frame = wrist
+                        # Convert C,H,W -> H,W,C
+                        frame = _np.transpose(frame, (1, 2, 0))
+                        self.add_image("sample/wrist_gt", frame, episode)
+                except Exception:
+                    logger.exception("Failed to log sample wrist frame to TensorBoard")
+
+            # Also add episode wrist video to TensorBoard (main process only)
+            if is_main_process:
+                try:
+                    if self.writer is not None and transitions and "wrist_rgb" in transitions[0]["obs"]:
+                        import numpy as _np
+                        tb_frames = []
+                        for t in transitions:
+                            next_obs = t.get("next_obs", {})
+                            wrist = next_obs.get("wrist_rgb")
+                            if wrist is None:
+                                wrist = t["obs"].get("wrist_rgb")
+                            if wrist is None:
+                                continue
+                            if hasattr(wrist, 'ndim') and wrist.ndim == 4:
+                                fr = wrist[-1]
+                            else:
+                                fr = wrist
+                            fr = _np.transpose(fr, (1, 2, 0))
+                            # Ensure uint8
+                            if fr.dtype != _np.uint8:
+                                if fr.max() <= 1.0:
+                                    fr = (fr * 255.0).astype(_np.uint8)
+                                else:
+                                    fr = fr.astype(_np.uint8)
+                            tb_frames.append(fr)
+                        if tb_frames:
+                            # Use trainer convenience which wraps add_video_to_writer
+                            self.add_video(f"video/episode_{episode:06d}", tb_frames, episode, fps=10)
+                except Exception:
+                    logger.exception("Failed to add episode wrist video to TensorBoard")
             
             if not is_main_process:
                 logger.debug(f"[Rank {self.accelerator.local_process_index}] Episode {episode}: collected {len(transitions)} transitions")
@@ -1085,6 +1390,17 @@ class StudentTrainer(BaseRLTrainer):
                         "log_std": self.log_std.data,
                     }
                 )
+            # Save episode video (MP4) to disk and TensorBoard
+            if (episode + 1) % self.video_save_every == 0 and is_main_process:
+                try:
+                    self._save_episode_video(episode + 1)
+                except Exception:
+                    logger.exception("Failed to save episode video for student")
+            else:
+                # Clear buffers to avoid memory growth
+                self.video_frames_head = []
+                self.video_frames_wrist = []
+                self.video_transitions = []
         
         # Final save
         self.save_checkpoint(num_episodes)
@@ -1143,10 +1459,44 @@ class StudentTrainer(BaseRLTrainer):
             batch["observation.images.image0"] = torch.stack(current_wrists).to(self.device)
             batch["observation.images.image0_mask"] = torch.ones(len(transitions), dtype=torch.bool, device=self.device)
         
-        # Normalize advantages
-        batch["advantages"] = (batch["advantages"] - batch["advantages"].mean()) / (
-            batch["advantages"].std() + 1e-8
-        )
+        # Note: Advantages are normalized in train_step (mini-batch level)
+        # We skip full-batch normalization here to avoid double normalization
+
+        # Handle per-transition initial memory states (if present)
+        # Expect per-transition entry: transitions[i]["initial_memory_state"]
+        memory_list = []
+        for t in transitions:
+            ms = t.get("initial_memory_state")
+            if ms is None:
+                # initialize zeros of shape (num_layers, hidden)
+                tmp = self._init_memory_state(batch_size=1).squeeze(1).to(self.device)
+                memory_list.append(tmp)
+            else:
+                if isinstance(ms, torch.Tensor):
+                    m = ms.detach().to(self.device)
+                else:
+                    # assume numpy
+                    m = torch.from_numpy(ms).float().to(self.device)
+                # Normalize shape to (num_layers, hidden)
+                if m.dim() == 3 and m.shape[1] == 1:
+                    m = m.squeeze(1)
+                elif m.dim() == 3 and m.shape[1] != 1:
+                    # take first batch entry
+                    m = m[:, 0, :]
+                elif m.dim() == 2:
+                    pass
+                else:
+                    # try to reshape
+                    m = m.reshape(m.shape[0], -1)
+                memory_list.append(m)
+
+        if memory_list:
+            # stack into shape (num_layers, batch_size, hidden)
+            try:
+                stacked = torch.stack(memory_list, dim=1).to(self.device)
+                batch["initial_memory_state"] = stacked
+            except Exception:
+                logger.exception("Failed to stack initial memory states for PPO batch")
         
         return batch
     
@@ -1226,35 +1576,16 @@ def main():
     accelerator = None
     if args.use_ddp:
         accelerator = create_accelerator(mixed_precision="no")
-        device = str(accelerator.device)
-        is_main_process = accelerator.is_main_process
-        accelerator.print("=" * 70)
-        accelerator.print("Student Policy Training (Phase 2) - DDP Mode")
-        accelerator.print(f"Number of processes: {accelerator.num_processes}")
-        accelerator.print("=" * 70)
-    else:
-        device = rl_config.get("device", "cuda:0")
-        # Ensure device has an index for torch.cuda.set_device
-        if device == "cuda":
-            device = "cuda:0"
-        is_main_process = True
-        logger.info("=" * 70)
-        logger.info("Student Policy Training (Phase 2)")
-        logger.info("=" * 70)
-    
+
+    # Resolve device and main-process flag via shared helper
+    device, is_main_process = resolve_device_and_process(accelerator, rl_config, args)
+
     # Setup logging from config (after accelerator is created so we know if main process)
     setup_logging_from_config(rl_config, is_main_process=is_main_process)
-    
-    # Log startup information
-    if is_main_process:
-        logger.info("=" * 70)
-        logger.info("Student Policy Training (Phase 2) - Starting")
-        logger.info(f"Teacher checkpoint: {args.teacher_path}")
-        logger.info(f"Number of episodes: {args.num_episodes or rl_config.training.num_episodes}")
-        logger.info(f"Using DDP: {args.use_ddp}")
-        if args.use_ddp:
-            logger.info(f"Number of processes: {accelerator.num_processes}")
-        logger.info("=" * 70)
+
+    # Print startup header via shared helper
+    extra_info = {"Number of episodes": (args.num_episodes or rl_config.training.num_episodes)}
+    print_startup_header("Student Policy Training (Phase 2)", device, is_main_process, use_ddp=args.use_ddp, num_processes=(getattr(accelerator, 'num_processes', None) if accelerator is not None else None), extra=extra_info)
     
     debug = rl_config.get("debug", False)
     
@@ -1283,7 +1614,7 @@ def main():
     # Create specific LoRA config for Teacher (matching the checkpoint training settings)
     # Teacher was trained with only ["q_proj", "v_proj"]
     teacher_lora_config = copy.deepcopy(lora_config)
-    teacher_lora_config.target_modules = ["q_proj", "v_proj"]
+    # teacher_lora_config.target_modules = ["q_proj", "v_proj"]
     
     # Load teacher policy (frozen)
     if accelerator is None or accelerator.is_main_process:

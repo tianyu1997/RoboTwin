@@ -82,6 +82,8 @@ from rl.training.rl_training_common import (
     count_trainable_params,
     setup_logging_from_config,
     set_policy_requires_grad,
+    resolve_device_and_process,
+    print_startup_header,
 )
 
 # Import parallel training utilities
@@ -358,6 +360,11 @@ class AdversarialTrainer(BaseRLTrainer):
         
         # Schedulers
         total_iterations = adv_config.get("total_iterations", 100000)
+        
+        # Adjust total_iterations for DDP (Global -> Per-Process)
+        if self.accelerator and self.accelerator.is_distributed:
+            total_iterations = max(1, total_iterations // self.accelerator.num_processes)
+            
         self.explorer_scheduler = CosineAnnealingLR(self.explorer_optimizer, T_max=total_iterations)
         self.wm_scheduler = CosineAnnealingLR(self.wm_optimizer, T_max=total_iterations)
         
@@ -384,6 +391,14 @@ class AdversarialTrainer(BaseRLTrainer):
             "adversarial_reward": deque(maxlen=100),
             "episode_reward": deque(maxlen=100),
         })
+        # Video buffers for MP4 saving and TB
+        self.video_frames_head = []
+        self.video_frames_wrist = []
+        self.video_transitions = []
+        train_cfg = rl_config.get("training", {})
+        self.video_save_every = int(train_cfg.get("video_save_every", 1))
+        if self._is_main_process():
+            (Path(output_dir) / "videos").mkdir(parents=True, exist_ok=True)
         
         # Prepare for DDP
         if self.accelerator is not None:
@@ -573,6 +588,13 @@ class AdversarialTrainer(BaseRLTrainer):
             # Execute action
             next_obs, env_reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
+
+            # Collect frames for video recording
+            try:
+                if self._is_main_process():
+                    self._collect_video_frame(obs, action)
+            except Exception:
+                logger.exception("Failed to collect video frame during adversarial episode")
             
             # Compute Adversarial Reward
             wm_batch = batch.copy()
@@ -610,6 +632,172 @@ class AdversarialTrainer(BaseRLTrainer):
         self._compute_advantages(transitions)
         
         return transitions
+
+    def _process_obs_image(self, img: np.ndarray) -> Optional[np.ndarray]:
+        import numpy as _np
+        if img is None:
+            return None
+        if not isinstance(img, _np.ndarray):
+            img = _np.array(img)
+        if img.ndim == 4:
+            img = img[-1]
+        if img.ndim == 3 and img.shape[0] == 3:
+            img = _np.transpose(img, (1, 2, 0))
+        if img.ndim != 3:
+            logger.warning(f"Unexpected image dims: {getattr(img, 'ndim', None)}")
+            return None
+        if img.dtype != _np.uint8:
+            if img.max() <= 1.0:
+                img = (img * 255.0).astype(_np.uint8)
+            else:
+                img = img.astype(_np.uint8)
+        return img
+
+    def _collect_video_frame(self, obs: Dict[str, np.ndarray], action: Any = None):
+        if not self._is_main_process():
+            return
+        # Head
+        head_img = obs.get("head_rgb")
+        head_frame = None
+        if head_img is not None:
+            head_frame = self._process_obs_image(head_img)
+        self.video_frames_head.append(head_frame.copy() if head_frame is not None else None)
+        # Wrist
+        wrist_img = obs.get("wrist_rgb")
+        wrist_frame = None
+        if wrist_img is not None:
+            wrist_frame = self._process_obs_image(wrist_img)
+        self.video_frames_wrist.append(wrist_frame.copy() if wrist_frame is not None else None)
+        # Transitions cache
+        if len(self.video_transitions) < 200:
+            self.video_transitions.append({
+                "obs": {k: (v.copy() if hasattr(v, 'copy') else v) for k, v in obs.items()},
+                "action": (action.copy() if hasattr(action, 'copy') else action),
+            })
+
+    def _save_episode_video(self, iteration: int):
+        if not self._is_main_process():
+            return
+        if not self.video_transitions or len(self.video_transitions) < self.n_obs_img_steps + 1:
+            logger.warning(f"Not enough frames for adversarial video (need {self.n_obs_img_steps + 1}, got {len(self.video_transitions)})")
+            self.video_frames_head = []
+            self.video_frames_wrist = []
+            self.video_transitions = []
+            return
+        try:
+            import imageio
+            import cv2
+            import numpy as _np
+
+            video_path = Path(self.env_config.get('output_dir', 'outputs/adversarial_rl')) / 'videos' / f'iter_{iteration:06d}.mp4'
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+
+            tb_frames = []
+            start_idx = self.n_obs_img_steps - 1
+            memory_state = None
+
+            for i in range(start_idx, len(self.video_transitions) - 1):
+                trans = self.video_transitions[i]
+                next_trans = self.video_transitions[i + 1]
+                obs = trans['obs']
+                next_obs = next_trans['obs']
+
+                head_frame = self.video_frames_head[i] if i < len(self.video_frames_head) else None
+                if head_frame is None:
+                    if self.video_frames_wrist and self.video_frames_wrist[0] is not None:
+                        h, w = self.video_frames_wrist[0].shape[:2]
+                    else:
+                        h, w = 256, 256
+                    head_frame = _np.ones((h, w, 3), dtype=_np.uint8) * 255
+
+                gt_wrist = next_obs.get('wrist_rgb')
+                if gt_wrist is None:
+                    continue
+                if getattr(gt_wrist, 'ndim', 3) == 4:
+                    gt_wrist = gt_wrist[-1]
+                gt_frame = self._process_obs_image(gt_wrist)
+                if gt_frame is None:
+                    continue
+
+                # Predict using world_model if available
+                pred_frame = None
+                try:
+                    if self.world_model is not None:
+                        if hasattr(self.env, '_build_policy_batch'):
+                            batch = self.env._build_policy_batch(obs, np.array(trans.get('action', 0), dtype=np.float32), use_head_camera=True)
+                        else:
+                            batch = {"observation.state": torch.from_numpy(obs.get('state')).float().unsqueeze(0).to(self.device)}
+                        if memory_state is None:
+                            memory_state = self._init_memory_state(batch_size=1)
+                        batch['initial_memory_state'] = memory_state
+                        with torch.no_grad():
+                            pred_imgs = self.world_model.predict_next_frame(batch)
+                        # pred_imgs expected [B, C, H, W] or [B, T, C, H, W]
+                        pred = pred_imgs.detach().cpu()
+                        if pred.ndim == 5:
+                            pred = pred[:, -1]
+                        pred = pred[0]
+                        pred_np = ((pred + 1.0) / 2.0).clamp(0.0, 1.0).numpy()
+                        pred_frame = (np.transpose(pred_np, (1, 2, 0)) * 255.0).astype(_np.uint8)
+                        if pred_frame.shape[:2] != gt_frame.shape[:2]:
+                            pred_frame = cv2.resize(pred_frame, (gt_frame.shape[1], gt_frame.shape[0]))
+                except Exception:
+                    logger.debug("World model prediction failed for adversarial video")
+
+                if pred_frame is None:
+                    pred_frame = gt_frame.copy()
+
+                # Compose combined frame same as teacher
+                gap = 5
+                label_h = 25
+                h, w = gt_frame.shape[:2]
+                raw_w = w * 3 + gap * 2
+                raw_h = h + label_h
+                combined_w = ((raw_w + 15) // 16) * 16
+                combined_h = ((raw_h + 15) // 16) * 16
+                pad_x = (combined_w - raw_w) // 2
+                pad_y = (combined_h - raw_h) // 2
+                combined = _np.ones((combined_h, combined_w, 3), dtype=_np.uint8) * 255
+                x_offset = pad_x
+                y_offset = pad_y
+                hf = head_frame
+                if hf.shape[:2] != (h, w):
+                    hf = cv2.resize(hf, (w, h))
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = hf
+                x_offset += w + gap
+                gf = gt_frame
+                if gf.shape[:2] != (h, w):
+                    gf = cv2.resize(gf, (w, h))
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = gf
+                x_offset += w + gap
+                pf = pred_frame
+                if pf.shape[:2] != (h, w):
+                    pf = cv2.resize(pf, (w, h))
+                combined[y_offset+label_h:y_offset+label_h+h, x_offset:x_offset+w] = pf
+                tb_frames.append(combined)
+
+            # write mp4
+            writer = imageio.get_writer(str(video_path), fps=10, codec='libx264', pixelformat='yuv420p', quality=8)
+            for f in tb_frames:
+                writer.append_data(f)
+            writer.close()
+
+            # add to TB
+            try:
+                if self.writer is not None and tb_frames:
+                    from rl.training.rl_training_common import add_video_to_writer
+                    add_video_to_writer(self.writer, f"video/iter_{iteration:06d}", tb_frames, iteration, fps=10)
+            except Exception:
+                logger.exception("Failed to add adversarial episode video to TensorBoard")
+
+            logger.info(f"[Video] Saved adversarial iteration video: {video_path}")
+
+        except Exception:
+            logger.exception("Error saving adversarial combined video")
+        finally:
+            self.video_frames_head = []
+            self.video_frames_wrist = []
+            self.video_transitions = []
 
     def _compute_advantages(self, transitions: List[Dict[str, Any]]):
         """Compute GAE advantages for PPO."""
@@ -773,6 +961,47 @@ class AdversarialTrainer(BaseRLTrainer):
         for iteration in iterator:
             # 1. Collect Data (Explorer interacts with Env)
             transitions = self.collect_episode()
+            # Log sample wrist frame to TensorBoard (main process only)
+            if self._is_main_process():
+                try:
+                    if self.writer is not None and transitions and "wrist_rgb" in transitions[0]["obs"]:
+                        import numpy as _np
+                        wrist = transitions[0]["obs"]["wrist_rgb"]
+                        if hasattr(wrist, 'ndim') and wrist.ndim == 4:
+                            frame = wrist[-1]
+                        else:
+                            frame = wrist
+                        frame = _np.transpose(frame, (1, 2, 0))
+                        # Use iteration as global step
+                        self.add_image("sample/wrist_gt", frame, iteration)
+                except Exception:
+                    logger.exception("Failed to log sample wrist frame to TensorBoard")
+            # Also add episode wrist video to TensorBoard (main process only)
+            if self._is_main_process():
+                try:
+                    if self.writer is not None and transitions and "wrist_rgb" in transitions[0]["obs"]:
+                        import numpy as _np
+                        tb_frames = []
+                        for t in transitions:
+                            next_obs = t.get("next_obs", {})
+                            wrist = next_obs.get("wrist_rgb") or t["obs"].get("wrist_rgb")
+                            if wrist is None:
+                                continue
+                            if hasattr(wrist, 'ndim') and wrist.ndim == 4:
+                                fr = wrist[-1]
+                            else:
+                                fr = wrist
+                            fr = _np.transpose(fr, (1, 2, 0))
+                            if fr.dtype != _np.uint8:
+                                if fr.max() <= 1.0:
+                                    fr = (fr * 255.0).astype(_np.uint8)
+                                else:
+                                    fr = fr.astype(_np.uint8)
+                            tb_frames.append(fr)
+                        if tb_frames:
+                            self.add_video(f"video/episode_{iteration:06d}", tb_frames, iteration, fps=10)
+                except Exception:
+                    logger.exception("Failed to add episode wrist video to TensorBoard")
             batch = self._build_ppo_batch(transitions)
             
             # 2. Update World Model
@@ -796,6 +1025,17 @@ class AdversarialTrainer(BaseRLTrainer):
                 if iteration % self.config.log_every == 0:
                     logger.info(f"Iter {iteration}: WM Loss={np.mean(self.metrics['wm_loss']):.4f}, "
                                 f"Exp Reward={np.mean(self.metrics['episode_reward']):.4f}")
+                # Save episode/iteration video (MP4) and TensorBoard
+                if iteration % self.video_save_every == 0:
+                    try:
+                        self._save_episode_video(iteration)
+                    except Exception:
+                        logger.exception("Failed to save adversarial episode video")
+                else:
+                    # Clear buffers
+                    self.video_frames_head = []
+                    self.video_frames_wrist = []
+                    self.video_transitions = []
 
 
 def main():
@@ -818,6 +1058,11 @@ def main():
     
     debug = rl_config.get("debug", False)
     model_config_file = rl_config.get("model", {}).get("config_file", "/mnt/data2/ty/F1-VLA/f1_vla/config/debug_test.yaml")
+
+    # Print startup header via shared helper
+    device, is_main_proc = resolve_device_and_process(accelerator, rl_config, args)
+    extra_info = {"Num envs per process": args.num_envs}
+    print_startup_header("Adversarial Training (Phase 3)", device, is_main_proc, use_ddp=args.use_ddp, num_processes=(getattr(accelerator, 'num_processes', None) if accelerator is not None else None), extra=extra_info)
     
     # Load Teacher (World Model)
     lora_config = get_lora_config_from_dict(rl_config)
