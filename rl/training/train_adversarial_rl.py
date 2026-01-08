@@ -238,11 +238,21 @@ class WorldModelWrapper(nn.Module):
         self,
         pred_imgs: torch.Tensor,
         gt_imgs: torch.Tensor,
+        weights: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute prediction loss."""
         if pred_imgs.shape[-2:] != gt_imgs.shape[-2:]:
             pred_imgs = F.interpolate(pred_imgs, size=gt_imgs.shape[-2:], mode='bilinear', align_corners=False)
-        return F.mse_loss(pred_imgs, gt_imgs)
+        
+        # Compute per-sample loss
+        loss = F.mse_loss(pred_imgs, gt_imgs, reduction='none')
+        # loss shape: [B, C, H, W] -> reduce to [B]
+        loss = loss.mean(dim=[1, 2, 3])
+        
+        if weights is not None:
+            loss = loss * weights
+            
+        return loss.mean()
 
 
 # =============================================================================
@@ -896,7 +906,23 @@ class AdversarialTrainer(BaseRLTrainer):
             return {"wm_loss": 0.0}
             
         pred_imgs = self.world_model.predict_next_frame(batch)
-        loss = self.world_model.compute_prediction_loss(pred_imgs, target_imgs)
+        
+        # Calculate weights for loss schedule
+        batch_size = target_imgs.shape[0]
+        warmup_steps = getattr(self.config, "loss_warmup_steps", 10)
+        start_weight = getattr(self.config, "loss_warmup_start_weight", 0.1)
+        
+        weights = None
+        if warmup_steps > 0:
+            # Assuming batch is sequential episode (0 to T)
+            weights = torch.ones(batch_size, device=self.device)
+            indices = torch.arange(batch_size, device=self.device)
+            mask = indices < warmup_steps
+            if mask.any():
+                progress = indices[mask].float() / warmup_steps
+                weights[mask] = start_weight + (1.0 - start_weight) * progress
+        
+        loss = self.world_model.compute_prediction_loss(pred_imgs, target_imgs, weights=weights)
         
         loss.backward()
         self.wm_optimizer.step()

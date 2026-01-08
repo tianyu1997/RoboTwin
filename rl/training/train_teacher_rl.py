@@ -204,7 +204,7 @@ class WorldModelTrainer:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # TensorBoard writer for teacher (only main process)
-        self.writer = create_summary_writer(self.output_dir, is_main_process=self._is_main_process())
+        self.writer = create_summary_writer(self.output_dir, is_main_process=self._is_main_process(), comment="teacher_rl")
         
         # Use accelerator device if available
         if accelerator is not None:
@@ -585,7 +585,7 @@ class WorldModelTrainer:
             "accuracy": loss_dict.get("wm_acc_mean", torch.tensor(0.0)).item(),
         }
     
-    def train_step_sequential(self, sequences: List[List[Dict[str, Any]]]) -> Dict[str, float]:
+    def train_step_sequential(self, sequences: List[List[Dict[str, Any]]], start_indices: Optional[List[int]] = None) -> Dict[str, float]:
         """
         Execute one training step with sequential transitions using truncated BPTT.
         
@@ -596,6 +596,7 @@ class WorldModelTrainer:
         Args:
             sequences: List of sequences, each sequence is a list of consecutive transitions
                        Shape: [batch_size, sequence_length, transition_dict]
+            start_indices: List of start indices for each sequence in the batch (for loss weighting)
         
         Returns:
             Dictionary with loss and accuracy
@@ -638,6 +639,10 @@ class WorldModelTrainer:
         total_acc = 0.0
         valid_steps = 0
         
+        # Loss Schedule Config
+        warmup_steps = getattr(self.config, "loss_warmup_steps", 10)
+        start_weight = getattr(self.config, "loss_warmup_start_weight", 0.1)
+        
         for step_idx in range(seq_length):
             # Gather transitions at this time step across all sequences
             step_transitions = [seq[step_idx] for seq in sequences]
@@ -670,8 +675,29 @@ class WorldModelTrainer:
                     # Last step or memory_backprop=False: detach
                     memory_state = output_memory_state.detach()
             
-            # Accumulate loss
+            # Accumulate loss with weighting
             step_loss = loss_dict["loss"]
+            
+            # Apply loss weighting if start_indices are provided
+            if start_indices is not None:
+                # Calculate weights for each sample in the batch
+                weights = []
+                for i in range(batch_size):
+                    current_episode_step = start_indices[i] + step_idx
+                    if current_episode_step < warmup_steps:
+                        progress = current_episode_step / warmup_steps
+                        w = start_weight + (1.0 - start_weight) * progress
+                    else:
+                        w = 1.0
+                    weights.append(w)
+                
+                # If step_loss is scalar (mean reduced), we can't apply individual weights easily
+                # unless we change forward_with_world_model to return unreduced loss.
+                # However, forward_with_world_model returns reduced loss by default.
+                # Approximation: use mean weight for the batch
+                avg_weight = sum(weights) / len(weights)
+                step_loss = step_loss * avg_weight
+            
             total_loss = total_loss + step_loss
             total_acc += loss_dict.get("wm_acc_mean", torch.tensor(0.0)).item()
             valid_steps += 1
@@ -788,22 +814,24 @@ class WorldModelTrainer:
                     # Sequential training with BPTT
                     # Sample sequences of consecutive transitions
                     if len(self.replay_buffer) >= self.batch_size * self.bptt_length:
-                        sequences = self.replay_buffer.sample_sequential_batch(
+                        sequences, start_indices = self.replay_buffer.sample_sequential_batch(
                             batch_size=self.batch_size,
-                            sequence_length=self.bptt_length
+                            sequence_length=self.bptt_length,
+                            return_start_indices=True
                         )
                     else:
                         # Not enough data for full sequences, use shorter ones
                         available_seq_len = max(1, len(self.replay_buffer) // max(1, self.batch_size))
-                        sequences = self.replay_buffer.sample_sequential_batch(
+                        sequences, start_indices = self.replay_buffer.sample_sequential_batch(
                             batch_size=min(self.batch_size, len(self.replay_buffer)),
-                            sequence_length=min(self.bptt_length, available_seq_len)
+                            sequence_length=min(self.bptt_length, available_seq_len),
+                            return_start_indices=True
                         )
                     
                     if not sequences:
                         continue
                     
-                    result = self.train_step_sequential(sequences)
+                    result = self.train_step_sequential(sequences, start_indices=start_indices)
                 else:
                     # Random batch training (original behavior)
                     if len(self.replay_buffer) >= self.batch_size:

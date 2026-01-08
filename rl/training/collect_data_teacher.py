@@ -231,4 +231,6 @@ def main():
     collector.collect(args.num_episodes)
 
 if __name__ == "__main__":
+    import sys
+    print(f"DEBUG ARGS: {sys.argv}")
     main()

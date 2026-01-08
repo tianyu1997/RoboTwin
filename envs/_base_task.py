@@ -155,7 +155,7 @@ class Base_Task(gym.Env):
 
         if self.cluttered_table:
             _logger.debug("    [+] Creating cluttered table...")
-            self.get_cluttered_table(cluttered_numbers=5)
+            self.get_cluttered_table(cluttered_numbers=12)
 
         _logger.debug("    Checking scene stability...")
         is_stable, unstable_list = self.check_stable()

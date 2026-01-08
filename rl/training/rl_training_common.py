@@ -270,6 +270,10 @@ class TrainingConfig:
     # Memory/Sequential processing
     sequential_training: bool = True
     
+    # Loss Schedule
+    loss_warmup_steps: int = 10
+    loss_warmup_start_weight: float = 0.1
+    
     # Action bounds
     action_scale: float = 1.0
     action_bounds_low: float = -1.0
@@ -348,6 +352,8 @@ def get_training_config(config: DictConfig) -> TrainingConfig:
         log_every=train_cfg.get("log_every", 10),
         save_every=train_cfg.get("save_every", 1000),
         sequential_training=train_cfg.get("sequential_training", True),
+        loss_warmup_steps=train_cfg.get("loss_warmup_steps", 10),
+        loss_warmup_start_weight=train_cfg.get("loss_warmup_start_weight", 0.1),
         action_scale=train_cfg.get("action_scale", 1.0),
         action_bounds_low=train_cfg.get("action_bounds", {}).get("low", -1.0),
         action_bounds_high=train_cfg.get("action_bounds", {}).get("high", 1.0),
@@ -475,12 +481,11 @@ def set_policy_requires_grad(
     if wm_expert_params := [n for n in trainable_params if "gemma_wm_expert" in n]:
         logger.info(f"ℹ️  World Model: {len(wm_expert_params)} trainable params.")
     else:
-        logger.info("ℹ️   World Model is frozen.")
+        logger.info("ℹ️   World Model is frozen (0 trainable params found).")
     
     # 3. Memory Modules
     if memory_params := [n for n in trainable_params if "memory" in n]:
         logger.info(f"✅ Memory modules: {len(memory_params)} trainable params.")
-        logger.info(f"   Examples: {memory_params}")
     else:
         logger.warning("⚠️  WARNING: No memory parameters are trainable! Check modules_to_save.")
 
@@ -972,6 +977,19 @@ class BatchBuilder:
         return key_map.get(key, key)
 
 
+def detach_recursive(obj):
+    if isinstance(obj, torch.Tensor):
+        return obj.detach()
+    elif isinstance(obj, list):
+        return [detach_recursive(x) for x in obj]
+    elif isinstance(obj, tuple):
+        return tuple(detach_recursive(x) for x in obj)
+    elif isinstance(obj, dict):
+        return {k: detach_recursive(v) for k, v in obj.items()}
+    else:
+        return obj
+
+
 # =============================================================================
 # Memory State Manager
 # =============================================================================
@@ -994,7 +1012,7 @@ class MemoryStateManager:
         self.max_cache_size = max_cache_size
         
         # Current memory states (for online processing)
-        self.current_memory: Optional[torch.Tensor] = None
+        self.current_memory: Any = None
         
         # Memory cache for batch training
         # Key: (episode_idx, frame_idx) -> memory_state tensor
@@ -1004,12 +1022,12 @@ class MemoryStateManager:
         """Reset current memory state (call at episode start)."""
         self.current_memory = None
     
-    def update(self, memory_state: Optional[torch.Tensor]):
+    def update(self, memory_state: Any):
         """Update current memory state from model output."""
         if memory_state is not None:
-            self.current_memory = memory_state.detach()
+            self.current_memory = detach_recursive(memory_state)
     
-    def get_current(self) -> Optional[torch.Tensor]:
+    def get_current(self) -> Any:
         """Get current memory state for injection into batch."""
         return self.current_memory
     
@@ -1017,7 +1035,7 @@ class MemoryStateManager:
         self,
         episode_idx: int,
         frame_idx: int,
-        memory_state: Optional[torch.Tensor],
+        memory_state: Any,
     ):
         """
         Cache memory state for batch training.
@@ -1033,13 +1051,13 @@ class MemoryStateManager:
         while len(self.memory_cache) >= self.max_cache_size:
             self.memory_cache.popitem(last=False)
         
-        self.memory_cache[key] = memory_state.detach() if memory_state is not None else None
+        self.memory_cache[key] = detach_recursive(memory_state) if memory_state is not None else None
     
     def get_cached(
         self,
         episode_idx: int,
         frame_idx: int,
-    ) -> Optional[torch.Tensor]:
+    ) -> Any:
         """Retrieve cached memory state."""
         return self.memory_cache.get((episode_idx, frame_idx))
     
@@ -1102,10 +1120,7 @@ class BaseRLTrainer(ABC):
         self.memory_backprop = getattr(config, 'memory_backprop', False)
         
         # Tensorboard (only on main process)
-        if self._is_main_process():
-            self.writer = SummaryWriter(self.output_dir / "tensorboard")
-        else:
-            self.writer = None
+        self.writer = create_summary_writer(self.output_dir, self._is_main_process(), comment="base_rl")
         
         # Metrics
         self.metrics: Dict[str, Any] = {
@@ -1443,18 +1458,36 @@ def setup_optimizer(
     return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
 
 
-def create_summary_writer(output_dir: Union[str, Path], is_main_process: bool = True) -> Optional[SummaryWriter]:
+def create_summary_writer(output_dir: Union[str, Path], is_main_process: bool = True, comment: str = "") -> Optional[SummaryWriter]:
     """
     Create a TensorBoard SummaryWriter under `output_dir/tensorboard`.
 
     Returns `None` for non-main processes to avoid duplicate logging in DDP.
+    
+    Args:
+        output_dir: Directory to create tensorboard logs in
+        is_main_process: Whether this is the main process (for DDP)
+        comment: Comment to append to the run name for easy identification
     """
     if not is_main_process:
         return None
+    
+    import datetime
+    
     out = Path(output_dir)
-    tb_dir = out / "tensorboard"
+    tb_root = out / "tensorboard"
+    
+    if comment:
+        timestamp = datetime.datetime.now().strftime("%b%d_%H-%M-%S")
+        run_name = f"{timestamp}_{comment}"
+        tb_dir = tb_root / run_name
+    else:
+        # Always create a timestamped subdirectory to avoid overwriting
+        timestamp = datetime.datetime.now().strftime("%b%d_%H-%M-%S")
+        tb_dir = tb_root / timestamp
+
     tb_dir.mkdir(parents=True, exist_ok=True)
-    return SummaryWriter(tb_dir)
+    return SummaryWriter(log_dir=str(tb_dir))
 
 
 def add_video_to_writer(writer: Optional[SummaryWriter], tag: str, frames: Union[List, np.ndarray], step: int, fps: int = 10) -> None:

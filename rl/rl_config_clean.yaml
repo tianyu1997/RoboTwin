@@ -69,7 +69,7 @@ environment:
     random_appearance: false
     random_background: false
     random_light: false
-    cluttered_table: true
+    cluttered_table: true # clear means background only, table is always cluttered with objects
   
   # Data type
   data_type:

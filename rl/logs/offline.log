@@ -5,158 +5,597 @@ Offline Teacher Training
 Device: cuda:0
 Using DDP: True
 ============================================================
-10:53:44 [INFO] PyTorch version 2.7.1 available.
+16:14:13 [INFO] PyTorch version 2.7.1 available.
   Loading config file...
   Loading F1Config from: /mnt/data2/ty/F1-VLA/f1_vla/config/f1_config.json
   Loading pretrained model from: /mnt/data2/ty/F1-VLA/pi0
-[INFO] Output Directory: outputs/teacher_offline
-[93mFreeze vision encoder: True[0m
-[93mFreeze gen expert: False[0m
-[93mTrain act expert only: False[0m
-[93mTrain gen expert only: True[0m
-[93mTraining World Model Expert only[0m
-[INFO] Output Directory: outputs/teacher_offline
-[93mFreeze vision encoder: True[0m
-[93mFreeze gen expert: False[0m
-[93mTrain act expert only: False[0m
-[93mTrain gen expert only: True[0m
-[93mTraining World Model Expert only[0m
-[93mFreeze vision encoder: True[0m
-[93mFreeze gen expert: False[0m
-[93mTrain act expert only: False[0m
-[93mTrain gen expert only: False[0m
 Loading weights from local directory: /mnt/data2/ty/F1-VLA/pi0
   Loading additional checkpoint...
-10:54:58 [INFO] Loading checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
-[INFO] Output Directory: outputs/teacher_offline
-[93mFreeze vision encoder: True[0m
-[93mFreeze gen expert: False[0m
-[93mTrain act expert only: False[0m
-[93mTrain gen expert only: True[0m
-[93mTraining World Model Expert only[0m
-10:55:01 [INFO] Successfully loaded checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+16:15:41 [INFO] Loading checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
+16:17:02 [INFO] Successfully loaded checkpoint from /mnt/data2/ty/F1-VLA/wm/model.safetensors
   Pretrained weights loaded successfully
   Applying LoRA configuration...
   Moving model to cuda:0...
   Model ready!
-[INFO] Output Directory: outputs/teacher_offline
-10:55:04 [INFO] Distributed Training: Adjusted num_episodes from 2000 (Global) to 500 (Per-Process)
-[93mFreeze vision encoder: True[0m
-[93mFreeze gen expert: False[0m
-[93mTrain act expert only: False[0m
-[93mTrain gen expert only: True[0m
-[93mTraining World Model Expert only[0m
-10:55:04 [INFO] --- Verifying Trainable Parameters ---
-10:55:04 [INFO] ✅ Vision encoder is frozen.
-10:55:04 [INFO] ✅ Base LLM is frozen.
-10:55:04 [INFO] ℹ️  Action Expert is frozen.
-10:55:04 [INFO] ℹ️  World Model: 252 trainable params.
-10:55:04 [INFO] ✅ Memory modules: 16 trainable params.
-10:55:04 [INFO]    Examples: ['base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.weight_ih_l0', 'base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.weight_hh_l0', 'base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.bias_ih_l0', 'base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.bias_hh_l0', 'base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.weight_ih_l1', 'base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.weight_hh_l1', 'base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.bias_ih_l1', 'base_model.model.model.paligemma_with_expert.memory_gru.modules_to_save.default.bias_hh_l1', 'base_model.model.model.paligemma_with_expert.memory_to_gemma.modules_to_save.default.0.weight', 'base_model.model.model.paligemma_with_expert.memory_to_gemma.modules_to_save.default.0.bias', 'base_model.model.model.paligemma_with_expert.memory_to_gemma.modules_to_save.default.2.weight', 'base_model.model.model.paligemma_with_expert.memory_to_gemma.modules_to_save.default.2.bias', 'base_model.model.model.paligemma_with_expert.memory_to_gemma_wm.modules_to_save.default.0.weight', 'base_model.model.model.paligemma_with_expert.memory_to_gemma_wm.modules_to_save.default.0.bias', 'base_model.model.model.paligemma_with_expert.memory_to_gemma_wm.modules_to_save.default.2.weight', 'base_model.model.model.paligemma_with_expert.memory_to_gemma_wm.modules_to_save.default.2.bias']
-Trainable parameters: 23,404,544 / 4,247,200,693
-Loading data from rl/data/teacher_offline...
-10:55:05 [INFO] Rank 0: Loading 100/400 episodes
-Loading episodes:   0%|          | 0/100 [00:00<?, ?it/s]Loading episodes:   1%|          | 1/100 [00:00<00:15,  6.22it/s]Loading episodes:   2%|▏         | 2/100 [00:00<00:17,  5.47it/s]Loading episodes:   3%|▎         | 3/100 [00:00<00:22,  4.24it/s]Loading episodes:   4%|▍         | 4/100 [00:00<00:18,  5.13it/s]Loading episodes:   5%|▌         | 5/100 [00:01<00:27,  3.46it/s]Loading episodes:   6%|▌         | 6/100 [00:01<00:22,  4.19it/s]Loading episodes:   7%|▋         | 7/100 [00:01<00:18,  5.05it/s]Loading episodes:   8%|▊         | 8/100 [00:01<00:16,  5.75it/s]Loading episodes:   9%|▉         | 9/100 [00:01<00:16,  5.66it/s]Loading episodes:  10%|█         | 10/100 [00:01<00:15,  5.91it/s]Loading episodes:  11%|█         | 11/100 [00:02<00:16,  5.36it/s]Loading episodes:  12%|█▏        | 12/100 [00:02<00:14,  5.91it/s]Loading episodes:  13%|█▎        | 13/100 [00:02<00:13,  6.60it/s]Loading episodes:  14%|█▍        | 14/100 [00:02<00:12,  6.83it/s]Loading episodes:  15%|█▌        | 15/100 [00:02<00:17,  4.97it/s]Loading episodes:  16%|█▌        | 16/100 [00:03<00:16,  4.97it/s]Loading episodes:  17%|█▋        | 17/100 [00:03<00:15,  5.21it/s]Loading episodes:  18%|█▊        | 18/100 [00:03<00:15,  5.31it/s]Loading episodes:  19%|█▉        | 19/100 [00:03<00:13,  5.86it/s]Loading episodes:  21%|██        | 21/100 [00:03<00:14,  5.27it/s]Loading episodes:  22%|██▏       | 22/100 [00:04<00:14,  5.47it/s]Loading episodes:  23%|██▎       | 23/100 [00:04<00:14,  5.36it/s]Loading episodes:  24%|██▍       | 24/100 [00:04<00:18,  4.15it/s]Loading episodes:  25%|██▌       | 25/100 [00:04<00:16,  4.50it/s]Loading episodes:  26%|██▌       | 26/100 [00:05<00:14,  5.15it/s]Loading episodes:  27%|██▋       | 27/100 [00:05<00:12,  5.70it/s]Loading episodes:  28%|██▊       | 28/100 [00:05<00:11,  6.31it/s]Loading episodes:  29%|██▉       | 29/100 [00:05<00:15,  4.55it/s]Loading episodes:  30%|███       | 30/100 [00:05<00:16,  4.25it/s]Loading episodes:  31%|███       | 31/100 [00:06<00:17,  3.89it/s]Loading episodes:  32%|███▏      | 32/100 [00:06<00:23,  2.93it/s]Loading episodes:  33%|███▎      | 33/100 [00:07<00:24,  2.75it/s]Loading episodes:  34%|███▍      | 34/100 [00:07<00:27,  2.42it/s]Loading episodes:  35%|███▌      | 35/100 [00:08<00:30,  2.12it/s]Loading episodes:  36%|███▌      | 36/100 [00:08<00:28,  2.23it/s]Loading episodes:  37%|███▋      | 37/100 [00:09<00:28,  2.19it/s]Loading episodes:  38%|███▊      | 38/100 [00:09<00:28,  2.15it/s]Loading episodes:  39%|███▉      | 39/100 [00:10<00:25,  2.36it/s]Loading episodes:  40%|████      | 40/100 [00:10<00:23,  2.53it/s]Loading episodes:  41%|████      | 41/100 [00:10<00:26,  2.21it/s]Loading episodes:  42%|████▏     | 42/100 [00:11<00:27,  2.13it/s]Loading episodes:  43%|████▎     | 43/100 [00:11<00:27,  2.10it/s]Loading episodes:  44%|████▍     | 44/100 [00:12<00:26,  2.13it/s]Loading episodes:  45%|████▌     | 45/100 [00:12<00:24,  2.24it/s]Loading episodes:  46%|████▌     | 46/100 [00:13<00:22,  2.36it/s]Loading episodes:  47%|████▋     | 47/100 [00:13<00:21,  2.41it/s]Loading episodes:  48%|████▊     | 48/100 [00:14<00:23,  2.23it/s]Loading episodes:  49%|████▉     | 49/100 [00:14<00:23,  2.17it/s]Loading episodes:  50%|█████     | 50/100 [00:14<00:21,  2.30it/s]Loading episodes:  51%|█████     | 51/100 [00:15<00:20,  2.37it/s]Loading episodes:  52%|█████▏    | 52/100 [00:15<00:21,  2.24it/s]Loading episodes:  53%|█████▎    | 53/100 [00:16<00:21,  2.23it/s]Loading episodes:  54%|█████▍    | 54/100 [00:16<00:20,  2.21it/s]Loading episodes:  55%|█████▌    | 55/100 [00:17<00:22,  2.01it/s]Loading episodes:  56%|█████▌    | 56/100 [00:17<00:20,  2.18it/s]Loading episodes:  57%|█████▋    | 57/100 [00:18<00:19,  2.17it/s]Loading episodes:  58%|█████▊    | 58/100 [00:18<00:18,  2.31it/s]Loading episodes:  59%|█████▉    | 59/100 [00:18<00:16,  2.49it/s]Loading episodes:  60%|██████    | 60/100 [00:19<00:15,  2.52it/s]Loading episodes:  61%|██████    | 61/100 [00:19<00:16,  2.34it/s]Loading episodes:  62%|██████▏   | 62/100 [00:20<00:15,  2.42it/s]Loading episodes:  63%|██████▎   | 63/100 [00:20<00:16,  2.24it/s]Loading episodes:  64%|██████▍   | 64/100 [00:21<00:16,  2.18it/s]Loading episodes:  65%|██████▌   | 65/100 [00:21<00:15,  2.30it/s]Loading episodes:  66%|██████▌   | 66/100 [00:22<00:16,  2.10it/s]Loading episodes:  67%|██████▋   | 67/100 [00:22<00:17,  1.87it/s]Loading episodes:  68%|██████▊   | 68/100 [00:23<00:15,  2.06it/s]Loading episodes:  69%|██████▉   | 69/100 [00:23<00:13,  2.25it/s]Loading episodes:  70%|███████   | 70/100 [00:24<00:14,  2.13it/s]Loading episodes:  71%|███████   | 71/100 [00:24<00:13,  2.16it/s]Loading episodes:  72%|███████▏  | 72/100 [00:24<00:13,  2.08it/s]Loading episodes:  73%|███████▎  | 73/100 [00:25<00:12,  2.16it/s]Loading episodes:  74%|███████▍  | 74/100 [00:25<00:11,  2.23it/s]Loading episodes:  75%|███████▌  | 75/100 [00:26<00:10,  2.35it/s]Loading episodes:  76%|███████▌  | 76/100 [00:26<00:09,  2.44it/s]Loading episodes:  77%|███████▋  | 77/100 [00:27<00:10,  2.24it/s]Loading episodes:  78%|███████▊  | 78/100 [00:27<00:09,  2.41it/s]Loading episodes:  79%|███████▉  | 79/100 [00:27<00:08,  2.53it/s]Loading episodes:  80%|████████  | 80/100 [00:28<00:07,  2.60it/s]Loading episodes:  81%|████████  | 81/100 [00:28<00:07,  2.68it/s]Loading episodes:  82%|████████▏ | 82/100 [00:28<00:07,  2.53it/s]Loading episodes:  83%|████████▎ | 83/100 [00:29<00:07,  2.42it/s]Loading episodes:  84%|████████▍ | 84/100 [00:29<00:06,  2.42it/s]Loading episodes:  85%|████████▌ | 85/100 [00:30<00:05,  2.60it/s]Loading episodes:  86%|████████▌ | 86/100 [00:30<00:05,  2.64it/s]Loading episodes:  87%|████████▋ | 87/100 [00:30<00:04,  2.63it/s]Loading episodes:  88%|████████▊ | 88/100 [00:31<00:05,  2.40it/s]Loading episodes:  89%|████████▉ | 89/100 [00:31<00:04,  2.22it/s]Loading episodes:  90%|█████████ | 90/100 [00:32<00:04,  2.14it/s]Loading episodes:  91%|█████████ | 91/100 [00:32<00:03,  2.28it/s]Loading episodes:  92%|█████████▏| 92/100 [00:33<00:03,  2.47it/s]Loading episodes:  93%|█████████▎| 93/100 [00:33<00:02,  2.50it/s]Loading episodes:  94%|█████████▍| 94/100 [00:33<00:02,  2.68it/s]Loading episodes:  95%|█████████▌| 95/100 [00:34<00:01,  2.60it/s]Loading episodes:  96%|█████████▌| 96/100 [00:34<00:01,  2.35it/s]Loading episodes:  97%|█████████▋| 97/100 [00:35<00:01,  2.38it/s]Loading episodes:  98%|█████████▊| 98/100 [00:35<00:00,  2.38it/s]Loading episodes:  99%|█████████▉| 99/100 [00:35<00:00,  2.53it/s]Loading episodes: 100%|██████████| 100/100 [00:36<00:00,  2.55it/s]Loading episodes: 100%|██████████| 100/100 [00:36<00:00,  2.75it/s]
-Loaded 100 episodes (per process). Buffer size: 5000 transitions.
-Training for 100 epochs (approx 714 steps/epoch, total 71400 steps)
+16:17:08 [INFO] Distributed Training: Adjusted num_episodes from 2000 (Global) to 500 (Per-Process)
+16:17:08 [INFO] --- Verifying Trainable Parameters ---
+16:17:08 [INFO] ✅ Vision encoder is frozen.
+16:17:08 [INFO] ✅ Base LLM is frozen.
+16:17:08 [INFO] ℹ️  Action Expert is frozen.
+16:17:08 [INFO] ℹ️  World Model: 252 trainable params.
+16:17:08 [INFO] ✅ Memory modules: 25 trainable params.
+Trainable parameters: 39,145,473 / 4,247,200,693
+Using mixed datasets: [{'path': './rl/data/clean', 'weight': 1.0}, {'path': './rl/data/complex_texture', 'weight': 0.5}]
+Loading dataset 0 from rl/data/clean (weight=1.0)...
+16:17:11 [INFO] Rank 0: Loading 108/432 episodes from rl/data/clean
+Loading clean:   0%|          | 0/108 [00:00<?, ?it/s]Loading clean:   1%|          | 1/108 [00:00<00:48,  2.19it/s]Loading clean:   2%|▏         | 2/108 [00:00<00:41,  2.58it/s]Loading clean:   3%|▎         | 3/108 [00:01<00:38,  2.72it/s]Loading clean:   4%|▎         | 4/108 [00:01<00:36,  2.86it/s]Loading clean:   5%|▍         | 5/108 [00:01<00:34,  3.02it/s]Loading clean:   6%|▌         | 6/108 [00:02<00:32,  3.12it/s]Loading clean:   6%|▋         | 7/108 [00:02<00:32,  3.12it/s]Loading clean:   7%|▋         | 8/108 [00:02<00:31,  3.14it/s]Loading clean:   8%|▊         | 9/108 [00:03<00:31,  3.16it/s]Loading clean:   9%|▉         | 10/108 [00:03<00:30,  3.21it/s]Loading clean:  10%|█         | 11/108 [00:03<00:30,  3.19it/s]Loading clean:  11%|█         | 12/108 [00:03<00:30,  3.17it/s]Loading clean:  12%|█▏        | 13/108 [00:04<00:30,  3.14it/s]Loading clean:  13%|█▎        | 14/108 [00:04<00:30,  3.04it/s]Loading clean:  14%|█▍        | 15/108 [00:04<00:31,  2.99it/s]Loading clean:  15%|█▍        | 16/108 [00:05<00:30,  3.01it/s]Loading clean:  16%|█▌        | 17/108 [00:05<00:31,  2.91it/s]Loading clean:  17%|█▋        | 18/108 [00:06<00:31,  2.88it/s]Loading clean:  18%|█▊        | 19/108 [00:06<00:30,  2.94it/s]Loading clean:  19%|█▊        | 20/108 [00:06<00:29,  2.97it/s]Loading clean:  19%|█▉        | 21/108 [00:06<00:28,  3.03it/s]Loading clean:  20%|██        | 22/108 [00:07<00:27,  3.13it/s]Loading clean:  21%|██▏       | 23/108 [00:07<00:28,  3.01it/s]Loading clean:  22%|██▏       | 24/108 [00:08<00:31,  2.63it/s]Loading clean:  23%|██▎       | 25/108 [00:08<00:34,  2.38it/s]Loading clean:  24%|██▍       | 26/108 [00:09<00:34,  2.36it/s]Loading clean:  25%|██▌       | 27/108 [00:09<00:39,  2.05it/s]Loading clean:  26%|██▌       | 28/108 [00:10<00:43,  1.86it/s]Loading clean:  27%|██▋       | 29/108 [00:11<00:45,  1.74it/s]Loading clean:  28%|██▊       | 30/108 [00:11<00:47,  1.65it/s]Loading clean:  29%|██▊       | 31/108 [00:12<00:48,  1.59it/s]Loading clean:  30%|██▉       | 32/108 [00:13<00:48,  1.55it/s]Loading clean:  31%|███       | 33/108 [00:13<00:49,  1.53it/s]Loading clean:  31%|███▏      | 34/108 [00:14<00:49,  1.50it/s]Loading clean:  32%|███▏      | 35/108 [00:15<00:48,  1.50it/s]Loading clean:  33%|███▎      | 36/108 [00:15<00:48,  1.50it/s]Loading clean:  34%|███▍      | 37/108 [00:16<00:48,  1.47it/s]Loading clean:  35%|███▌      | 38/108 [00:17<00:48,  1.45it/s]Loading clean:  36%|███▌      | 39/108 [00:17<00:47,  1.45it/s]Loading clean:  37%|███▋      | 40/108 [00:18<00:47,  1.44it/s]Loading clean:  38%|███▊      | 41/108 [00:19<00:45,  1.46it/s]Loading clean:  39%|███▉      | 42/108 [00:19<00:45,  1.45it/s]Loading clean:  40%|███▉      | 43/108 [00:20<00:45,  1.44it/s]Loading clean:  41%|████      | 44/108 [00:21<00:44,  1.43it/s]Loading clean:  42%|████▏     | 45/108 [00:22<00:44,  1.43it/s]Loading clean:  43%|████▎     | 46/108 [00:22<00:43,  1.44it/s]Loading clean:  44%|████▎     | 47/108 [00:23<00:43,  1.41it/s]Loading clean:  44%|████▍     | 48/108 [00:24<00:42,  1.41it/s]Loading clean:  45%|████▌     | 49/108 [00:24<00:42,  1.40it/s]Loading clean:  46%|████▋     | 50/108 [00:25<00:41,  1.41it/s]Loading clean:  47%|████▋     | 51/108 [00:26<00:40,  1.41it/s]Loading clean:  48%|████▊     | 52/108 [00:27<00:39,  1.41it/s]Loading clean:  49%|████▉     | 53/108 [00:27<00:38,  1.43it/s]Loading clean:  50%|█████     | 54/108 [00:28<00:37,  1.43it/s]Loading clean:  51%|█████     | 55/108 [00:29<00:37,  1.43it/s]Loading clean:  52%|█████▏    | 56/108 [00:29<00:36,  1.44it/s]Loading clean:  53%|█████▎    | 57/108 [00:30<00:35,  1.44it/s]Loading clean:  54%|█████▎    | 58/108 [00:31<00:34,  1.44it/s]Loading clean:  55%|█████▍    | 59/108 [00:31<00:34,  1.44it/s]Loading clean:  56%|█████▌    | 60/108 [00:32<00:33,  1.42it/s]Loading clean:  56%|█████▋    | 61/108 [00:33<00:32,  1.44it/s]Loading clean:  57%|█████▋    | 62/108 [00:33<00:32,  1.44it/s]Loading clean:  58%|█████▊    | 63/108 [00:34<00:31,  1.43it/s]Loading clean:  59%|█████▉    | 64/108 [00:35<00:30,  1.42it/s]Loading clean:  60%|██████    | 65/108 [00:36<00:30,  1.42it/s]Loading clean:  61%|██████    | 66/108 [00:36<00:29,  1.42it/s]Loading clean:  62%|██████▏   | 67/108 [00:37<00:28,  1.42it/s]Loading clean:  63%|██████▎   | 68/108 [00:38<00:28,  1.43it/s]Loading clean:  64%|██████▍   | 69/108 [00:38<00:27,  1.42it/s]Loading clean:  65%|██████▍   | 70/108 [00:39<00:26,  1.44it/s]Loading clean:  66%|██████▌   | 71/108 [00:40<00:25,  1.44it/s]Loading clean:  67%|██████▋   | 72/108 [00:41<00:25,  1.42it/s]Loading clean:  68%|██████▊   | 73/108 [00:41<00:24,  1.45it/s]Loading clean:  69%|██████▊   | 74/108 [00:42<00:23,  1.47it/s]Loading clean:  69%|██████▉   | 75/108 [00:43<00:22,  1.46it/s]Loading clean:  70%|███████   | 76/108 [00:43<00:21,  1.46it/s]Loading clean:  71%|███████▏  | 77/108 [00:44<00:21,  1.46it/s]Loading clean:  72%|███████▏  | 78/108 [00:45<00:20,  1.46it/s]Loading clean:  73%|███████▎  | 79/108 [00:45<00:19,  1.46it/s]Loading clean:  74%|███████▍  | 80/108 [00:46<00:19,  1.45it/s]Loading clean:  75%|███████▌  | 81/108 [00:47<00:18,  1.47it/s]Loading clean:  76%|███████▌  | 82/108 [00:47<00:17,  1.48it/s]Loading clean:  77%|███████▋  | 83/108 [00:48<00:16,  1.47it/s]Loading clean:  78%|███████▊  | 84/108 [00:49<00:16,  1.49it/s]Loading clean:  79%|███████▊  | 85/108 [00:49<00:15,  1.47it/s]Loading clean:  80%|███████▉  | 86/108 [00:50<00:15,  1.47it/s]Loading clean:  81%|████████  | 87/108 [00:51<00:13,  1.50it/s]Loading clean:  81%|████████▏ | 88/108 [00:51<00:13,  1.48it/s]Loading clean:  82%|████████▏ | 89/108 [00:52<00:12,  1.47it/s]Loading clean:  83%|████████▎ | 90/108 [00:53<00:12,  1.48it/s]Loading clean:  84%|████████▍ | 91/108 [00:53<00:11,  1.47it/s]Loading clean:  85%|████████▌ | 92/108 [00:54<00:10,  1.47it/s]Loading clean:  86%|████████▌ | 93/108 [00:55<00:10,  1.48it/s]Loading clean:  87%|████████▋ | 94/108 [00:55<00:09,  1.48it/s]Loading clean:  88%|████████▊ | 95/108 [00:56<00:08,  1.48it/s]Loading clean:  89%|████████▉ | 96/108 [00:57<00:08,  1.47it/s]Loading clean:  90%|████████▉ | 97/108 [00:57<00:07,  1.46it/s]Loading clean:  91%|█████████ | 98/108 [00:58<00:06,  1.47it/s]Loading clean:  92%|█████████▏| 99/108 [00:59<00:06,  1.45it/s]Loading clean:  93%|█████████▎| 100/108 [01:00<00:05,  1.44it/s]Loading clean:  94%|█████████▎| 101/108 [01:00<00:04,  1.45it/s]Loading clean:  94%|█████████▍| 102/108 [01:01<00:04,  1.43it/s]Loading clean:  95%|█████████▌| 103/108 [01:02<00:03,  1.43it/s]Loading clean:  96%|█████████▋| 104/108 [01:02<00:02,  1.44it/s]Loading clean:  97%|█████████▋| 105/108 [01:03<00:02,  1.44it/s]Loading clean:  98%|█████████▊| 106/108 [01:04<00:01,  1.44it/s]Loading clean:  99%|█████████▉| 107/108 [01:04<00:00,  1.45it/s]Loading clean: 100%|██████████| 108/108 [01:05<00:00,  1.45it/s]Loading clean: 100%|██████████| 108/108 [01:05<00:00,  1.65it/s]
+Loading dataset 1 from rl/data/complex_texture (weight=0.5)...
+16:18:19 [INFO] Rank 0: Loading 120/480 episodes from rl/data/complex_texture
+Loading complex_texture:   0%|          | 0/120 [00:00<?, ?it/s]Loading complex_texture:   1%|          | 1/120 [00:01<02:05,  1.05s/it]Loading complex_texture:   2%|▏         | 2/120 [00:02<02:03,  1.05s/it]Loading complex_texture:   2%|▎         | 3/120 [00:02<01:47,  1.09it/s]Loading complex_texture:   3%|▎         | 4/120 [00:03<01:34,  1.22it/s]Loading complex_texture:   4%|▍         | 5/120 [00:04<01:34,  1.21it/s]Loading complex_texture:   5%|▌         | 6/120 [00:05<01:49,  1.04it/s]Loading complex_texture:   6%|▌         | 7/120 [00:06<01:49,  1.03it/s]Loading complex_texture:   7%|▋         | 8/120 [00:07<01:42,  1.09it/s]Loading complex_texture:   8%|▊         | 9/120 [00:07<01:27,  1.27it/s]Loading complex_texture:   8%|▊         | 10/120 [00:08<01:22,  1.34it/s]Loading complex_texture:   9%|▉         | 11/120 [00:09<01:17,  1.40it/s]Loading complex_texture:  10%|█         | 12/120 [00:09<01:13,  1.47it/s]Loading complex_texture:  11%|█         | 13/120 [00:10<01:08,  1.55it/s]Loading complex_texture:  12%|█▏        | 14/120 [00:10<01:04,  1.64it/s]Loading complex_texture:  12%|█▎        | 15/120 [00:11<01:01,  1.71it/s]Loading complex_texture:  13%|█▎        | 16/120 [00:11<00:54,  1.91it/s]Loading complex_texture:  14%|█▍        | 17/120 [00:12<00:50,  2.03it/s]Loading complex_texture:  15%|█▌        | 18/120 [00:12<00:48,  2.12it/s]Loading complex_texture:  16%|█▌        | 19/120 [00:13<00:51,  1.97it/s]Loading complex_texture:  17%|█▋        | 20/120 [00:13<00:48,  2.06it/s]Loading complex_texture:  18%|█▊        | 21/120 [00:14<00:46,  2.15it/s]Loading complex_texture:  18%|█▊        | 22/120 [00:14<00:44,  2.20it/s]Loading complex_texture:  19%|█▉        | 23/120 [00:14<00:44,  2.19it/s]Loading complex_texture:  20%|██        | 24/120 [00:15<00:43,  2.20it/s]Loading complex_texture:  21%|██        | 25/120 [00:18<01:48,  1.14s/it]Loading complex_texture:  22%|██▏       | 26/120 [00:20<02:22,  1.51s/it]Loading complex_texture:  22%|██▎       | 27/120 [00:23<02:59,  1.93s/it]Loading complex_texture:  23%|██▎       | 28/120 [00:27<03:56,  2.57s/it]Loading complex_texture:  24%|██▍       | 29/120 [00:29<03:46,  2.49s/it]Loading complex_texture:  25%|██▌       | 30/120 [00:31<03:30,  2.33s/it]Loading complex_texture:  26%|██▌       | 31/120 [00:33<03:21,  2.27s/it]Loading complex_texture:  27%|██▋       | 32/120 [00:35<02:53,  1.97s/it]Loading complex_texture:  28%|██▊       | 33/120 [00:37<03:10,  2.19s/it]Loading complex_texture:  28%|██▊       | 34/120 [00:40<03:15,  2.28s/it]Loading complex_texture:  29%|██▉       | 35/120 [00:43<03:28,  2.46s/it]Loading complex_texture:  30%|███       | 36/120 [00:45<03:17,  2.36s/it]Loading complex_texture:  31%|███       | 37/120 [00:48<03:30,  2.54s/it]Loading complex_texture:  32%|███▏      | 38/120 [00:53<04:21,  3.19s/it]Loading complex_texture:  32%|███▎      | 39/120 [00:57<04:45,  3.52s/it]Loading complex_texture:  33%|███▎      | 40/120 [01:01<04:52,  3.65s/it]Loading complex_texture:  34%|███▍      | 41/120 [01:06<05:17,  4.02s/it]Loading complex_texture:  35%|███▌      | 42/120 [01:09<05:09,  3.97s/it]Loading complex_texture:  36%|███▌      | 43/120 [01:13<04:52,  3.80s/it]Loading complex_texture:  37%|███▋      | 44/120 [01:15<03:58,  3.14s/it]Loading complex_texture:  38%|███▊      | 45/120 [01:17<03:41,  2.95s/it]Loading complex_texture:  38%|███▊      | 46/120 [01:21<03:51,  3.13s/it]Loading complex_texture:  39%|███▉      | 47/120 [01:23<03:28,  2.86s/it]Loading complex_texture:  40%|████      | 48/120 [01:25<03:21,  2.80s/it]Loading complex_texture:  41%|████      | 49/120 [01:26<02:31,  2.13s/it]Loading complex_texture:  42%|████▏     | 50/120 [01:27<01:57,  1.67s/it]Loading complex_texture:  42%|████▎     | 51/120 [01:27<01:33,  1.35s/it]Loading complex_texture:  43%|████▎     | 52/120 [01:28<01:12,  1.07s/it]Loading complex_texture:  44%|████▍     | 53/120 [01:28<00:59,  1.13it/s]Loading complex_texture:  45%|████▌     | 54/120 [01:29<00:49,  1.33it/s]Loading complex_texture:  46%|████▌     | 55/120 [01:29<00:45,  1.42it/s]Loading complex_texture:  47%|████▋     | 56/120 [01:30<00:39,  1.62it/s]Loading complex_texture:  48%|████▊     | 57/120 [01:30<00:37,  1.70it/s]Loading complex_texture:  48%|████▊     | 58/120 [01:30<00:33,  1.85it/s]Loading complex_texture:  49%|████▉     | 59/120 [01:31<00:34,  1.78it/s]Loading complex_texture:  50%|█████     | 60/120 [01:32<00:32,  1.84it/s]Loading complex_texture:  51%|█████     | 61/120 [01:32<00:32,  1.82it/s]Loading complex_texture:  52%|█████▏    | 62/120 [01:33<00:31,  1.86it/s]Loading complex_texture:  52%|█████▎    | 63/120 [01:33<00:28,  1.99it/s]Loading complex_texture:  53%|█████▎    | 64/120 [01:34<00:28,  1.97it/s]Loading complex_texture:  54%|█████▍    | 65/120 [01:34<00:26,  2.06it/s]Loading complex_texture:  55%|█████▌    | 66/120 [01:35<00:28,  1.88it/s]Loading complex_texture:  56%|█████▌    | 67/120 [01:35<00:27,  1.91it/s]Loading complex_texture:  57%|█████▋    | 68/120 [01:36<00:27,  1.87it/s]Loading complex_texture:  57%|█████▊    | 69/120 [01:36<00:24,  2.05it/s]Loading complex_texture:  58%|█████▊    | 70/120 [01:37<00:26,  1.92it/s]Loading complex_texture:  59%|█████▉    | 71/120 [01:37<00:24,  2.01it/s]Loading complex_texture:  60%|██████    | 72/120 [01:38<00:24,  1.98it/s]Loading complex_texture:  61%|██████    | 73/120 [01:38<00:22,  2.09it/s]Loading complex_texture:  62%|██████▏   | 74/120 [01:39<00:25,  1.78it/s]Loading complex_texture:  62%|██████▎   | 75/120 [01:39<00:26,  1.72it/s]Loading complex_texture:  63%|██████▎   | 76/120 [01:40<00:22,  1.93it/s]Loading complex_texture:  64%|██████▍   | 77/120 [01:40<00:22,  1.88it/s]Loading complex_texture:  65%|██████▌   | 78/120 [01:41<00:23,  1.82it/s]Loading complex_texture:  66%|██████▌   | 79/120 [01:41<00:21,  1.94it/s]Loading complex_texture:  67%|██████▋   | 80/120 [01:42<00:20,  1.97it/s]Loading complex_texture:  68%|██████▊   | 81/120 [01:42<00:18,  2.06it/s]Loading complex_texture:  68%|██████▊   | 82/120 [01:43<00:18,  2.10it/s]Loading complex_texture:  69%|██████▉   | 83/120 [01:43<00:18,  1.99it/s]Loading complex_texture:  70%|███████   | 84/120 [01:44<00:17,  2.09it/s]Loading complex_texture:  71%|███████   | 85/120 [01:44<00:16,  2.15it/s]Loading complex_texture:  72%|███████▏  | 86/120 [01:45<00:15,  2.25it/s]Loading complex_texture:  72%|███████▎  | 87/120 [01:45<00:14,  2.28it/s]Loading complex_texture:  73%|███████▎  | 88/120 [01:45<00:13,  2.32it/s]Loading complex_texture:  74%|███████▍  | 89/120 [01:46<00:13,  2.33it/s]Loading complex_texture:  75%|███████▌  | 90/120 [01:46<00:12,  2.34it/s]Loading complex_texture:  76%|███████▌  | 91/120 [01:47<00:13,  2.11it/s]Loading complex_texture:  77%|███████▋  | 92/120 [01:47<00:13,  2.12it/s]Loading complex_texture:  78%|███████▊  | 93/120 [01:48<00:12,  2.23it/s]Loading complex_texture:  78%|███████▊  | 94/120 [01:48<00:11,  2.17it/s]Loading complex_texture:  79%|███████▉  | 95/120 [01:49<00:11,  2.16it/s]Loading complex_texture:  80%|████████  | 96/120 [01:49<00:10,  2.19it/s]Loading complex_texture:  81%|████████  | 97/120 [01:50<00:11,  2.06it/s]Loading complex_texture:  82%|████████▏ | 98/120 [01:50<00:10,  2.06it/s]Loading complex_texture:  82%|████████▎ | 99/120 [01:51<00:10,  1.93it/s]Loading complex_texture:  83%|████████▎ | 100/120 [01:52<00:12,  1.60it/s]Loading complex_texture:  84%|████████▍ | 101/120 [01:52<00:11,  1.70it/s]Loading complex_texture:  85%|████████▌ | 102/120 [01:53<00:10,  1.75it/s]Loading complex_texture:  86%|████████▌ | 103/120 [01:53<00:09,  1.70it/s]Loading complex_texture:  87%|████████▋ | 104/120 [01:54<00:10,  1.53it/s]Loading complex_texture:  88%|████████▊ | 105/120 [01:55<00:09,  1.54it/s]Loading complex_texture:  88%|████████▊ | 106/120 [01:56<00:09,  1.48it/s]Loading complex_texture:  89%|████████▉ | 107/120 [01:56<00:09,  1.32it/s]Loading complex_texture:  90%|█████████ | 108/120 [01:57<00:08,  1.38it/s]Loading complex_texture:  91%|█████████ | 109/120 [01:58<00:07,  1.49it/s]Loading complex_texture:  92%|█████████▏| 110/120 [01:58<00:06,  1.57it/s]Loading complex_texture:  92%|█████████▎| 111/120 [01:59<00:05,  1.66it/s]Loading complex_texture:  93%|█████████▎| 112/120 [01:59<00:04,  1.64it/s]Loading complex_texture:  94%|█████████▍| 113/120 [02:00<00:04,  1.54it/s]Loading complex_texture:  95%|█████████▌| 114/120 [02:01<00:03,  1.60it/s]Loading complex_texture:  96%|█████████▌| 115/120 [02:01<00:03,  1.62it/s]Loading complex_texture:  97%|█████████▋| 116/120 [02:02<00:02,  1.67it/s]Loading complex_texture:  98%|█████████▊| 117/120 [02:03<00:01,  1.61it/s]Loading complex_texture:  98%|█████████▊| 118/120 [02:03<00:01,  1.59it/s]Loading complex_texture:  99%|█████████▉| 119/120 [02:04<00:00,  1.57it/s]Loading complex_texture: 100%|██████████| 120/120 [02:04<00:00,  1.59it/s]Loading complex_texture: 100%|██████████| 120/120 [02:04<00:00,  1.04s/it]
+Total loaded 228 episodes across all datasets.
+Training for 100 epochs (approx 1134 steps/epoch, total 113400 steps)
 Epochs:   0%|          | 0/100 [00:00<?, ?it/s]
-Ep 1:   0%|          | 0/100 [00:00<?, ?it/s][A
-Ep 1:   0%|          | 0/100 [00:03<?, ?it/s, loss=10.728, acc=0.002][A
-Ep 1:   0%|          | 0/100 [00:06<?, ?it/s, loss=10.705, acc=0.001][A
-Ep 1:   0%|          | 0/100 [00:09<?, ?it/s, loss=10.661, acc=0.001][A
-Ep 1:   0%|          | 0/100 [00:12<?, ?it/s, loss=10.766, acc=0.002][A
-Ep 1:   0%|          | 0/100 [00:15<?, ?it/s, loss=10.786, acc=0.000][A
-Ep 1:   0%|          | 0/100 [00:18<?, ?it/s, loss=10.821, acc=0.001][A
-Ep 1:   0%|          | 0/100 [00:21<?, ?it/s, loss=10.650, acc=0.003][A
-Ep 1:   0%|          | 0/100 [00:21<?, ?it/s, loss=11.197, acc=0.001][A
-Ep 1:   1%|          | 1/100 [00:21<35:32, 21.54s/it, loss=11.197, acc=0.001][A
-Ep 1:   1%|          | 1/100 [00:24<35:32, 21.54s/it, loss=10.661, acc=0.004][A
-Ep 1:   1%|          | 1/100 [00:27<35:32, 21.54s/it, loss=10.683, acc=0.003][A
-Ep 1:   1%|          | 1/100 [00:30<35:32, 21.54s/it, loss=10.708, acc=0.005][A
-Ep 1:   1%|          | 1/100 [00:33<35:32, 21.54s/it, loss=10.659, acc=0.005][A
-Ep 1:   1%|          | 1/100 [00:35<35:32, 21.54s/it, loss=10.638, acc=0.004][A
-Ep 1:   1%|          | 1/100 [00:38<35:32, 21.54s/it, loss=10.647, acc=0.004][A
-Ep 1:   1%|          | 1/100 [00:41<35:32, 21.54s/it, loss=10.551, acc=0.007][A
-Ep 1:   1%|          | 1/100 [00:42<35:32, 21.54s/it, loss=10.738, acc=0.001][A
-Ep 1:   2%|▏         | 2/100 [00:42<34:17, 20.99s/it, loss=10.738, acc=0.001][A
-Ep 1:   2%|▏         | 2/100 [00:45<34:17, 20.99s/it, loss=10.448, acc=0.001][A
-Ep 1:   2%|▏         | 2/100 [00:47<34:17, 20.99s/it, loss=10.306, acc=0.002][A
-Ep 1:   2%|▏         | 2/100 [00:50<34:17, 20.99s/it, loss=10.354, acc=0.002][A
-Ep 1:   2%|▏         | 2/100 [00:53<34:17, 20.99s/it, loss=10.487, acc=0.004][A
-Ep 1:   2%|▏         | 2/100 [00:56<34:17, 20.99s/it, loss=10.393, acc=0.002][A
-Ep 1:   2%|▏         | 2/100 [01:00<34:17, 20.99s/it, loss=10.341, acc=0.004][A
-Ep 1:   2%|▏         | 2/100 [01:02<34:17, 20.99s/it, loss=10.300, acc=0.009][A
-Ep 1:   2%|▏         | 2/100 [01:03<34:17, 20.99s/it, loss=10.954, acc=0.003][A
-Ep 1:   3%|▎         | 3/100 [01:03<34:09, 21.12s/it, loss=10.954, acc=0.003][A
-Ep 1:   3%|▎         | 3/100 [01:06<34:09, 21.12s/it, loss=10.589, acc=0.001][A
-Ep 1:   3%|▎         | 3/100 [01:09<34:09, 21.12s/it, loss=10.513, acc=0.002][A
-Ep 1:   3%|▎         | 3/100 [01:12<34:09, 21.12s/it, loss=10.749, acc=0.002][A
-Ep 1:   3%|▎         | 3/100 [01:15<34:09, 21.12s/it, loss=10.673, acc=0.001][A
-Ep 1:   3%|▎         | 3/100 [01:17<34:09, 21.12s/it, loss=10.659, acc=0.003][A
-Ep 1:   3%|▎         | 3/100 [01:20<34:09, 21.12s/it, loss=10.744, acc=0.003][A
-Ep 1:   3%|▎         | 3/100 [01:23<34:09, 21.12s/it, loss=10.746, acc=0.001][A
-Ep 1:   3%|▎         | 3/100 [01:24<34:09, 21.12s/it, loss=10.834, acc=0.001][A
-Ep 1:   4%|▍         | 4/100 [01:24<33:35, 20.99s/it, loss=10.834, acc=0.001][A
-Ep 1:   4%|▍         | 4/100 [01:27<33:35, 20.99s/it, loss=10.604, acc=0.001][A
-Ep 1:   4%|▍         | 4/100 [01:30<33:35, 20.99s/it, loss=10.552, acc=0.001][A
-Ep 1:   4%|▍         | 4/100 [01:32<33:35, 20.99s/it, loss=10.492, acc=0.001][A
-Ep 1:   4%|▍         | 4/100 [01:35<33:35, 20.99s/it, loss=10.541, acc=0.003][A
-Ep 1:   4%|▍         | 4/100 [01:38<33:35, 20.99s/it, loss=10.466, acc=0.003][A
-Ep 1:   4%|▍         | 4/100 [01:41<33:35, 20.99s/it, loss=10.233, acc=0.002][A
-Ep 1:   4%|▍         | 4/100 [01:44<33:35, 20.99s/it, loss=10.292, acc=0.003][A
-Ep 1:   4%|▍         | 4/100 [01:45<33:35, 20.99s/it, loss=10.827, acc=0.000][A
-Ep 1:   5%|▌         | 5/100 [01:45<33:09, 20.95s/it, loss=10.827, acc=0.000][A
-Ep 1:   5%|▌         | 5/100 [01:47<33:09, 20.95s/it, loss=10.601, acc=0.000][A
-Ep 1:   5%|▌         | 5/100 [01:50<33:09, 20.95s/it, loss=10.633, acc=0.000][A
-Ep 1:   5%|▌         | 5/100 [01:53<33:09, 20.95s/it, loss=10.619, acc=0.000][A
-Ep 1:   5%|▌         | 5/100 [01:56<33:09, 20.95s/it, loss=10.503, acc=0.001][A
-Ep 1:   5%|▌         | 5/100 [01:59<33:09, 20.95s/it, loss=10.517, acc=0.000][A
-Ep 1:   5%|▌         | 5/100 [02:02<33:09, 20.95s/it, loss=10.596, acc=0.000][A
-Ep 1:   5%|▌         | 5/100 [02:05<33:09, 20.95s/it, loss=10.558, acc=0.001][A
-Ep 1:   5%|▌         | 5/100 [02:06<33:09, 20.95s/it, loss=10.631, acc=0.000][A
-Ep 1:   6%|▌         | 6/100 [02:06<32:48, 20.94s/it, loss=10.631, acc=0.000][A
-Ep 1:   6%|▌         | 6/100 [02:08<32:48, 20.94s/it, loss=10.474, acc=0.002][A
-Ep 1:   6%|▌         | 6/100 [02:11<32:48, 20.94s/it, loss=10.399, acc=0.001][A
-Ep 1:   6%|▌         | 6/100 [02:14<32:48, 20.94s/it, loss=10.290, acc=0.001][A
-Ep 1:   6%|▌         | 6/100 [02:17<32:48, 20.94s/it, loss=10.429, acc=0.001][A
-Ep 1:   6%|▌         | 6/100 [02:20<32:48, 20.94s/it, loss=10.547, acc=0.001][A
-Ep 1:   6%|▌         | 6/100 [02:23<32:48, 20.94s/it, loss=10.545, acc=0.001][A
-Ep 1:   6%|▌         | 6/100 [02:26<32:48, 20.94s/it, loss=10.351, acc=0.001][A
-Ep 1:   6%|▌         | 6/100 [02:27<32:48, 20.94s/it, loss=10.354, acc=0.001][A
-Ep 1:   7%|▋         | 7/100 [02:27<32:30, 20.97s/it, loss=10.354, acc=0.001][A
-Ep 1:   7%|▋         | 7/100 [02:30<32:30, 20.97s/it, loss=10.374, acc=0.001][A
-Ep 1:   7%|▋         | 7/100 [02:32<32:30, 20.97s/it, loss=10.382, acc=0.000][A
-Ep 1:   7%|▋         | 7/100 [02:35<32:30, 20.97s/it, loss=10.398, acc=0.002][A
-Ep 1:   7%|▋         | 7/100 [02:38<32:30, 20.97s/it, loss=10.403, acc=0.001][A
-Ep 1:   7%|▋         | 7/100 [02:41<32:30, 20.97s/it, loss=10.475, acc=0.001][A
-Ep 1:   7%|▋         | 7/100 [02:44<32:30, 20.97s/it, loss=10.373, acc=0.002][A
-Ep 1:   7%|▋         | 7/100 [02:47<32:30, 20.97s/it, loss=10.446, acc=0.001][A
-Ep 1:   7%|▋         | 7/100 [02:48<32:30, 20.97s/it, loss=10.418, acc=0.001][A
-Ep 1:   8%|▊         | 8/100 [02:48<32:12, 21.00s/it, loss=10.418, acc=0.001][A
-Ep 1:   8%|▊         | 8/100 [02:51<32:12, 21.00s/it, loss=10.102, acc=0.001][A
-Ep 1:   8%|▊         | 8/100 [02:54<32:12, 21.00s/it, loss=10.134, acc=0.000][A
-Ep 1:   8%|▊         | 8/100 [02:56<32:12, 21.00s/it, loss=9.928, acc=0.001] [A
-Ep 1:   8%|▊         | 8/100 [02:59<32:12, 21.00s/it, loss=9.951, acc=0.002][A
-Ep 1:   8%|▊         | 8/100 [03:02<32:12, 21.00s/it, loss=9.993, acc=0.004][A
-Ep 1:   8%|▊         | 8/100 [03:05<32:12, 21.00s/it, loss=10.113, acc=0.005][A
-Ep 1:   8%|▊         | 8/100 [03:08<32:12, 21.00s/it, loss=10.128, acc=0.007][A
-Ep 1:   8%|▊         | 8/100 [03:09<32:12, 21.00s/it, loss=10.369, acc=0.000][A
-Ep 1:   9%|▉         | 9/100 [03:09<31:53, 21.03s/it, loss=10.369, acc=0.000][A
-Ep 1:   9%|▉         | 9/100 [03:12<31:53, 21.03s/it, loss=9.981, acc=0.001] [A
-Ep 1:   9%|▉         | 9/100 [03:15<31:53, 21.03s/it, loss=9.984, acc=0.001][A
-Ep 1:   9%|▉         | 9/100 [03:18<31:53, 21.03s/it, loss=10.032, acc=0.001][A
-Ep 1:   9%|▉         | 9/100 [03:21<31:53, 21.03s/it, loss=9.964, acc=0.001] [A
-Ep 1:   9%|▉         | 9/100 [03:23<31:53, 21.03s/it, loss=9.839, acc=0.004][A
-Ep 1:   9%|▉         | 9/100 [03:26<31:53, 21.03s/it, loss=9.827, acc=0.004][A
-Ep 1:   9%|▉         | 9/100 [03:29<31:53, 21.03s/it, loss=9.914, acc=0.002][A
-Ep 1:   9%|▉         | 9/100 [03:30<31:53, 21.03s/it, loss=10.020, acc=0.000][A
-Ep 1:  10%|█         | 10/100 [03:30<31:36, 21.07s/it, loss=10.020, acc=0.000][A
-Ep 1:  10%|█         | 10/100 [03:33<31:36, 21.07s/it, loss=9.904, acc=0.001] [A
-Ep 1:  10%|█         | 10/100 [03:36<31:36, 21.07s/it, loss=9.887, acc=0.001][AW1215 10:59:17.956000 1609536 site-packages/torch/distributed/elastic/agent/server/api.py:719] Received Signals.SIGTERM death signal, shutting down workers
-W1215 10:59:17.957000 1609536 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1609775 closing signal SIGTERM
-W1215 10:59:17.958000 1609536 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1609776 closing signal SIGTERM
-W1215 10:59:17.958000 1609536 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1609782 closing signal SIGTERM
-W1215 10:59:17.959000 1609536 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 1609783 closing signal SIGTERM
+Ep 1:   0%|          | 0/162 [00:00<?, ?it/s][A
+Ep 1:   0%|          | 0/162 [00:10<?, ?it/s, loss=10.746, acc=0.003][A
+Ep 1:   0%|          | 0/162 [00:13<?, ?it/s, loss=10.858, acc=0.003][A
+Ep 1:   0%|          | 0/162 [00:16<?, ?it/s, loss=10.856, acc=0.003][A
+Ep 1:   0%|          | 0/162 [00:19<?, ?it/s, loss=10.760, acc=0.005][A
+Ep 1:   0%|          | 0/162 [00:22<?, ?it/s, loss=10.668, acc=0.003][A
+Ep 1:   0%|          | 0/162 [00:25<?, ?it/s, loss=10.589, acc=0.005][A
+Ep 1:   0%|          | 0/162 [00:28<?, ?it/s, loss=10.766, acc=0.005][A
+Ep 1:   1%|          | 1/162 [00:28<1:15:48, 28.25s/it, loss=10.766, acc=0.005][A
+Ep 1:   1%|          | 1/162 [00:31<1:15:48, 28.25s/it, loss=10.768, acc=0.002][A
+Ep 1:   1%|          | 1/162 [00:34<1:15:48, 28.25s/it, loss=10.637, acc=0.005][A
+Ep 1:   1%|          | 1/162 [00:37<1:15:48, 28.25s/it, loss=10.686, acc=0.003][A
+Ep 1:   1%|          | 1/162 [00:39<1:15:48, 28.25s/it, loss=10.722, acc=0.002][A
+Ep 1:   1%|          | 1/162 [00:42<1:15:48, 28.25s/it, loss=10.664, acc=0.003][A
+Ep 1:   1%|          | 1/162 [00:45<1:15:48, 28.25s/it, loss=10.631, acc=0.003][A
+Ep 1:   1%|          | 1/162 [00:48<1:15:48, 28.25s/it, loss=10.668, acc=0.004][A
+Ep 1:   1%|          | 2/162 [00:48<1:03:13, 23.71s/it, loss=10.668, acc=0.004][A
+Ep 1:   1%|          | 2/162 [00:51<1:03:13, 23.71s/it, loss=10.959, acc=0.000][A
+Ep 1:   1%|          | 2/162 [00:54<1:03:13, 23.71s/it, loss=10.880, acc=0.001][A
+Ep 1:   1%|          | 2/162 [00:57<1:03:13, 23.71s/it, loss=10.866, acc=0.001][A
+Ep 1:   1%|          | 2/162 [01:00<1:03:13, 23.71s/it, loss=10.876, acc=0.002][A
+Ep 1:   1%|          | 2/162 [01:03<1:03:13, 23.71s/it, loss=10.793, acc=0.001][A
+Ep 1:   1%|          | 2/162 [01:06<1:03:13, 23.71s/it, loss=10.820, acc=0.001][A
+Ep 1:   1%|          | 2/162 [01:09<1:03:13, 23.71s/it, loss=10.771, acc=0.000][A
+Ep 1:   2%|▏         | 3/162 [01:09<58:56, 22.24s/it, loss=10.771, acc=0.000]  [A
+Ep 1:   2%|▏         | 3/162 [01:12<58:56, 22.24s/it, loss=10.739, acc=0.002][A
+Ep 1:   2%|▏         | 3/162 [01:15<58:56, 22.24s/it, loss=10.640, acc=0.004][A
+Ep 1:   2%|▏         | 3/162 [01:18<58:56, 22.24s/it, loss=10.705, acc=0.005][A
+Ep 1:   2%|▏         | 3/162 [01:20<58:56, 22.24s/it, loss=10.427, acc=0.006][A
+Ep 1:   2%|▏         | 3/162 [01:23<58:56, 22.24s/it, loss=10.483, acc=0.007][A
+Ep 1:   2%|▏         | 3/162 [01:26<58:56, 22.24s/it, loss=10.386, acc=0.004][A
+Ep 1:   2%|▏         | 3/162 [01:29<58:56, 22.24s/it, loss=10.236, acc=0.005][A
+Ep 1:   2%|▏         | 4/162 [01:29<56:39, 21.52s/it, loss=10.236, acc=0.005][A
+Ep 1:   2%|▏         | 4/162 [02:08<56:39, 21.52s/it, loss=10.415, acc=0.004][A
+Ep 1:   2%|▏         | 4/162 [02:11<56:39, 21.52s/it, loss=10.536, acc=0.003][A
+Ep 1:   2%|▏         | 4/162 [02:14<56:39, 21.52s/it, loss=10.586, acc=0.001][A
+Ep 1:   2%|▏         | 4/162 [02:17<56:39, 21.52s/it, loss=10.514, acc=0.000][A
+Ep 1:   2%|▏         | 4/162 [02:20<56:39, 21.52s/it, loss=10.401, acc=0.001][A
+Ep 1:   2%|▏         | 4/162 [02:22<56:39, 21.52s/it, loss=10.419, acc=0.002][A
+Ep 1:   2%|▏         | 4/162 [02:25<56:39, 21.52s/it, loss=10.430, acc=0.001][A
+Ep 1:   3%|▎         | 5/162 [02:25<1:29:03, 34.03s/it, loss=10.430, acc=0.001][A
+Ep 1:   3%|▎         | 5/162 [02:28<1:29:03, 34.03s/it, loss=10.175, acc=0.008][A
+Ep 1:   3%|▎         | 5/162 [02:31<1:29:03, 34.03s/it, loss=10.092, acc=0.009][A
+Ep 1:   3%|▎         | 5/162 [02:34<1:29:03, 34.03s/it, loss=9.971, acc=0.005] [A
+Ep 1:   3%|▎         | 5/162 [02:37<1:29:03, 34.03s/it, loss=9.852, acc=0.009][A
+Ep 1:   3%|▎         | 5/162 [02:40<1:29:03, 34.03s/it, loss=9.949, acc=0.006][A
+Ep 1:   3%|▎         | 5/162 [02:43<1:29:03, 34.03s/it, loss=9.975, acc=0.005][A
+Ep 1:   3%|▎         | 5/162 [02:46<1:29:03, 34.03s/it, loss=9.987, acc=0.004][A
+Ep 1:   4%|▎         | 6/162 [02:46<1:16:33, 29.44s/it, loss=9.987, acc=0.004][A
+Ep 1:   4%|▎         | 6/162 [02:49<1:16:33, 29.44s/it, loss=10.651, acc=0.000][A
+Ep 1:   4%|▎         | 6/162 [02:52<1:16:33, 29.44s/it, loss=10.632, acc=0.001][A
+Ep 1:   4%|▎         | 6/162 [02:55<1:16:33, 29.44s/it, loss=10.582, acc=0.001][A
+Ep 1:   4%|▎         | 6/162 [02:58<1:16:33, 29.44s/it, loss=10.457, acc=0.002][A
+Ep 1:   4%|▎         | 6/162 [03:01<1:16:33, 29.44s/it, loss=10.444, acc=0.000][A
+Ep 1:   4%|▎         | 6/162 [03:04<1:16:33, 29.44s/it, loss=10.374, acc=0.001][A
+Ep 1:   4%|▎         | 6/162 [03:07<1:16:33, 29.44s/it, loss=10.345, acc=0.003][A
+Ep 1:   4%|▍         | 7/162 [03:07<1:08:39, 26.58s/it, loss=10.345, acc=0.003][A
+Ep 1:   4%|▍         | 7/162 [03:10<1:08:39, 26.58s/it, loss=10.103, acc=0.004][A
+Ep 1:   4%|▍         | 7/162 [03:13<1:08:39, 26.58s/it, loss=10.074, acc=0.004][A
+Ep 1:   4%|▍         | 7/162 [03:15<1:08:39, 26.58s/it, loss=9.841, acc=0.006] [A
+Ep 1:   4%|▍         | 7/162 [03:18<1:08:39, 26.58s/it, loss=9.670, acc=0.007][A
+Ep 1:   4%|▍         | 7/162 [03:21<1:08:39, 26.58s/it, loss=9.672, acc=0.011][A
+Ep 1:   4%|▍         | 7/162 [03:24<1:08:39, 26.58s/it, loss=9.898, acc=0.008][A
+Ep 1:   4%|▍         | 7/162 [03:27<1:08:39, 26.58s/it, loss=10.013, acc=0.008][A
+Ep 1:   5%|▍         | 8/162 [03:27<1:03:24, 24.70s/it, loss=10.013, acc=0.008][A
+Ep 1:   5%|▍         | 8/162 [03:30<1:03:24, 24.70s/it, loss=9.870, acc=0.004] [A
+Ep 1:   5%|▍         | 8/162 [03:33<1:03:24, 24.70s/it, loss=9.667, acc=0.008][A
+Ep 1:   5%|▍         | 8/162 [03:36<1:03:24, 24.70s/it, loss=9.731, acc=0.005][A
+Ep 1:   5%|▍         | 8/162 [03:39<1:03:24, 24.70s/it, loss=9.665, acc=0.007][A
+Ep 1:   5%|▍         | 8/162 [03:42<1:03:24, 24.70s/it, loss=9.766, acc=0.007][A
+Ep 1:   5%|▍         | 8/162 [03:45<1:03:24, 24.70s/it, loss=9.732, acc=0.006][A
+Ep 1:   5%|▍         | 8/162 [03:48<1:03:24, 24.70s/it, loss=9.735, acc=0.006][A
+Ep 1:   6%|▌         | 9/162 [03:48<59:49, 23.46s/it, loss=9.735, acc=0.006]  [A
+Ep 1:   6%|▌         | 9/162 [04:27<59:49, 23.46s/it, loss=9.914, acc=0.004][A
+Ep 1:   6%|▌         | 9/162 [04:30<59:49, 23.46s/it, loss=9.924, acc=0.004][A
+Ep 1:   6%|▌         | 9/162 [04:33<59:49, 23.46s/it, loss=9.924, acc=0.004][A
+Ep 1:   6%|▌         | 9/162 [04:36<59:49, 23.46s/it, loss=9.865, acc=0.009][A
+Ep 1:   6%|▌         | 9/162 [04:39<59:49, 23.46s/it, loss=9.730, acc=0.010][A
+Ep 1:   6%|▌         | 9/162 [04:42<59:49, 23.46s/it, loss=9.396, acc=0.015][A
+Ep 1:   6%|▌         | 9/162 [04:45<59:49, 23.46s/it, loss=9.123, acc=0.015][A
+Ep 1:   6%|▌         | 10/162 [04:45<1:25:37, 33.80s/it, loss=9.123, acc=0.015][A
+Ep 1:   6%|▌         | 10/162 [04:48<1:25:37, 33.80s/it, loss=9.657, acc=0.012][A
+Ep 1:   6%|▌         | 10/162 [04:51<1:25:37, 33.80s/it, loss=9.622, acc=0.007][A
+Ep 1:   6%|▌         | 10/162 [04:54<1:25:37, 33.80s/it, loss=9.482, acc=0.010][A
+Ep 1:   6%|▌         | 10/162 [04:57<1:25:37, 33.80s/it, loss=9.345, acc=0.009][A
+Ep 1:   6%|▌         | 10/162 [05:00<1:25:37, 33.80s/it, loss=9.485, acc=0.008][A16:25:41 [INFO] Memory Gate WM: 0.000915
+
+Ep 1:   6%|▌         | 10/162 [05:03<1:25:37, 33.80s/it, loss=9.307, acc=0.012][A
+Ep 1:   6%|▌         | 10/162 [05:06<1:25:37, 33.80s/it, loss=9.532, acc=0.007][A
+Ep 1:   7%|▋         | 11/162 [05:06<1:14:56, 29.78s/it, loss=9.532, acc=0.007][A
+Ep 1:   7%|▋         | 11/162 [05:09<1:14:56, 29.78s/it, loss=9.804, acc=0.005][A
+Ep 1:   7%|▋         | 11/162 [05:12<1:14:56, 29.78s/it, loss=9.832, acc=0.004][A
+Ep 1:   7%|▋         | 11/162 [05:15<1:14:56, 29.78s/it, loss=9.706, acc=0.004][A
+Ep 1:   7%|▋         | 11/162 [05:17<1:14:56, 29.78s/it, loss=9.506, acc=0.006][A
+Ep 1:   7%|▋         | 11/162 [05:20<1:14:56, 29.78s/it, loss=9.570, acc=0.008][A
+Ep 1:   7%|▋         | 11/162 [05:23<1:14:56, 29.78s/it, loss=9.690, acc=0.006][A
+Ep 1:   7%|▋         | 11/162 [05:26<1:14:56, 29.78s/it, loss=9.404, acc=0.011][A
+Ep 1:   7%|▋         | 12/162 [05:26<1:07:33, 27.02s/it, loss=9.404, acc=0.011][A
+Ep 1:   7%|▋         | 12/162 [05:29<1:07:33, 27.02s/it, loss=9.512, acc=0.006][A
+Ep 1:   7%|▋         | 12/162 [05:32<1:07:33, 27.02s/it, loss=9.213, acc=0.008][A
+Ep 1:   7%|▋         | 12/162 [05:35<1:07:33, 27.02s/it, loss=8.910, acc=0.009][A
+Ep 1:   7%|▋         | 12/162 [05:38<1:07:33, 27.02s/it, loss=9.118, acc=0.007][A
+Ep 1:   7%|▋         | 12/162 [05:41<1:07:33, 27.02s/it, loss=9.054, acc=0.011][A
+Ep 1:   7%|▋         | 12/162 [05:44<1:07:33, 27.02s/it, loss=9.411, acc=0.003][A
+Ep 1:   7%|▋         | 12/162 [05:47<1:07:33, 27.02s/it, loss=9.604, acc=0.002][A
+Ep 1:   8%|▊         | 13/162 [05:47<1:02:29, 25.17s/it, loss=9.604, acc=0.002][A
+Ep 1:   8%|▊         | 13/162 [05:50<1:02:29, 25.17s/it, loss=9.825, acc=0.001][A
+Ep 1:   8%|▊         | 13/162 [05:53<1:02:29, 25.17s/it, loss=9.868, acc=0.001][A
+Ep 1:   8%|▊         | 13/162 [05:56<1:02:29, 25.17s/it, loss=9.848, acc=0.001][A
+Ep 1:   8%|▊         | 13/162 [05:59<1:02:29, 25.17s/it, loss=9.790, acc=0.002][A
+Ep 1:   8%|▊         | 13/162 [06:02<1:02:29, 25.17s/it, loss=9.870, acc=0.002][A
+Ep 1:   8%|▊         | 13/162 [06:05<1:02:29, 25.17s/it, loss=9.746, acc=0.003][A
+Ep 1:   8%|▊         | 13/162 [06:08<1:02:29, 25.17s/it, loss=9.802, acc=0.003][A
+Ep 1:   9%|▊         | 14/162 [06:08<58:52, 23.87s/it, loss=9.802, acc=0.003]  [A
+Ep 1:   9%|▊         | 14/162 [06:47<58:52, 23.87s/it, loss=9.641, acc=0.002][A
+Ep 1:   9%|▊         | 14/162 [06:50<58:52, 23.87s/it, loss=9.665, acc=0.005][A
+Ep 1:   9%|▊         | 14/162 [06:53<58:52, 23.87s/it, loss=9.655, acc=0.004][A
+Ep 1:   9%|▊         | 14/162 [06:56<58:52, 23.87s/it, loss=9.587, acc=0.002][A
+Ep 1:   9%|▊         | 14/162 [06:59<58:52, 23.87s/it, loss=9.761, acc=0.001][A
+Ep 1:   9%|▊         | 14/162 [07:02<58:52, 23.87s/it, loss=9.776, acc=0.001][A
+Ep 1:   9%|▊         | 14/162 [07:05<58:52, 23.87s/it, loss=9.797, acc=0.001][A
+Ep 1:   9%|▉         | 15/162 [07:05<1:22:50, 33.81s/it, loss=9.797, acc=0.001][A
+Ep 1:   9%|▉         | 15/162 [07:08<1:22:50, 33.81s/it, loss=8.961, acc=0.008][A
+Ep 1:   9%|▉         | 15/162 [07:11<1:22:50, 33.81s/it, loss=8.987, acc=0.009][A
+Ep 1:   9%|▉         | 15/162 [07:14<1:22:50, 33.81s/it, loss=8.909, acc=0.008][A
+Ep 1:   9%|▉         | 15/162 [07:17<1:22:50, 33.81s/it, loss=8.856, acc=0.008][A
+Ep 1:   9%|▉         | 15/162 [07:20<1:22:50, 33.81s/it, loss=8.801, acc=0.008][A
+Ep 1:   9%|▉         | 15/162 [07:23<1:22:50, 33.81s/it, loss=8.910, acc=0.008][A
+Ep 1:   9%|▉         | 15/162 [07:26<1:22:50, 33.81s/it, loss=9.014, acc=0.009][A
+Ep 1:  10%|▉         | 16/162 [07:26<1:12:51, 29.94s/it, loss=9.014, acc=0.009][A
+Ep 1:  10%|▉         | 16/162 [07:29<1:12:51, 29.94s/it, loss=9.769, acc=0.000][A
+Ep 1:  10%|▉         | 16/162 [07:32<1:12:51, 29.94s/it, loss=9.656, acc=0.003][A
+Ep 1:  10%|▉         | 16/162 [07:35<1:12:51, 29.94s/it, loss=9.569, acc=0.003][A
+Ep 1:  10%|▉         | 16/162 [07:38<1:12:51, 29.94s/it, loss=9.573, acc=0.003][A
+Ep 1:  10%|▉         | 16/162 [07:41<1:12:51, 29.94s/it, loss=9.627, acc=0.002][A
+Ep 1:  10%|▉         | 16/162 [07:44<1:12:51, 29.94s/it, loss=9.750, acc=0.001][A
+Ep 1:  10%|▉         | 16/162 [07:47<1:12:51, 29.94s/it, loss=9.683, acc=0.003][A
+Ep 1:  10%|█         | 17/162 [07:47<1:05:47, 27.22s/it, loss=9.683, acc=0.003][A
+Ep 1:  10%|█         | 17/162 [07:50<1:05:47, 27.22s/it, loss=9.223, acc=0.003][A16:28:30 [INFO] Memory Gate WM: 0.001731
+
+Ep 1:  10%|█         | 17/162 [07:53<1:05:47, 27.22s/it, loss=9.209, acc=0.005][A
+Ep 1:  10%|█         | 17/162 [07:56<1:05:47, 27.22s/it, loss=9.150, acc=0.005][A
+Ep 1:  10%|█         | 17/162 [07:59<1:05:47, 27.22s/it, loss=9.129, acc=0.005][A
+Ep 1:  10%|█         | 17/162 [08:02<1:05:47, 27.22s/it, loss=9.103, acc=0.003][A
+Ep 1:  10%|█         | 17/162 [08:05<1:05:47, 27.22s/it, loss=8.997, acc=0.005][A
+Ep 1:  10%|█         | 17/162 [08:08<1:05:47, 27.22s/it, loss=8.697, acc=0.020][A
+Ep 1:  11%|█         | 18/162 [08:08<1:00:46, 25.32s/it, loss=8.697, acc=0.020][A
+Ep 1:  11%|█         | 18/162 [08:11<1:00:46, 25.32s/it, loss=9.117, acc=0.003][A
+Ep 1:  11%|█         | 18/162 [08:14<1:00:46, 25.32s/it, loss=9.160, acc=0.002][A
+Ep 1:  11%|█         | 18/162 [08:17<1:00:46, 25.32s/it, loss=8.937, acc=0.006][A
+Ep 1:  11%|█         | 18/162 [08:20<1:00:46, 25.32s/it, loss=8.677, acc=0.013][A
+Ep 1:  11%|█         | 18/162 [08:23<1:00:46, 25.32s/it, loss=8.750, acc=0.007][A
+Ep 1:  11%|█         | 18/162 [08:26<1:00:46, 25.32s/it, loss=8.769, acc=0.007][A
+Ep 1:  11%|█         | 18/162 [08:29<1:00:46, 25.32s/it, loss=8.774, acc=0.007][A
+Ep 1:  12%|█▏        | 19/162 [08:29<57:14, 24.02s/it, loss=8.774, acc=0.007]  [A
+Ep 1:  12%|█▏        | 19/162 [09:08<57:14, 24.02s/it, loss=9.328, acc=0.001][A
+Ep 1:  12%|█▏        | 19/162 [09:11<57:14, 24.02s/it, loss=9.178, acc=0.005][A
+Ep 1:  12%|█▏        | 19/162 [09:14<57:14, 24.02s/it, loss=9.203, acc=0.004][A
+Ep 1:  12%|█▏        | 19/162 [09:17<57:14, 24.02s/it, loss=9.142, acc=0.002][A
+Ep 1:  12%|█▏        | 19/162 [09:20<57:14, 24.02s/it, loss=9.198, acc=0.002][A
+Ep 1:  12%|█▏        | 19/162 [09:23<57:14, 24.02s/it, loss=9.150, acc=0.002][A
+Ep 1:  12%|█▏        | 19/162 [09:26<57:14, 24.02s/it, loss=9.150, acc=0.002][A
+Ep 1:  12%|█▏        | 20/162 [09:26<1:20:10, 33.87s/it, loss=9.150, acc=0.002][A
+Ep 1:  12%|█▏        | 20/162 [09:28<1:20:10, 33.87s/it, loss=8.649, acc=0.005][A
+Ep 1:  12%|█▏        | 20/162 [09:31<1:20:10, 33.87s/it, loss=8.722, acc=0.007][A
+Ep 1:  12%|█▏        | 20/162 [09:34<1:20:10, 33.87s/it, loss=8.607, acc=0.009][A
+Ep 1:  12%|█▏        | 20/162 [09:37<1:20:10, 33.87s/it, loss=8.603, acc=0.007][A
+Ep 1:  12%|█▏        | 20/162 [09:40<1:20:10, 33.87s/it, loss=8.597, acc=0.007][A
+Ep 1:  12%|█▏        | 20/162 [09:43<1:20:10, 33.87s/it, loss=8.606, acc=0.005][A
+Ep 1:  12%|█▏        | 20/162 [09:46<1:20:10, 33.87s/it, loss=8.455, acc=0.006][A
+Ep 1:  13%|█▎        | 21/162 [09:46<1:10:11, 29.87s/it, loss=8.455, acc=0.006][A
+Ep 1:  13%|█▎        | 21/162 [09:49<1:10:11, 29.87s/it, loss=9.428, acc=0.001][A
+Ep 1:  13%|█▎        | 21/162 [09:52<1:10:11, 29.87s/it, loss=9.384, acc=0.002][A
+Ep 1:  13%|█▎        | 21/162 [09:55<1:10:11, 29.87s/it, loss=9.455, acc=0.002][A
+Ep 1:  13%|█▎        | 21/162 [09:58<1:10:11, 29.87s/it, loss=9.429, acc=0.001][A
+Ep 1:  13%|█▎        | 21/162 [10:01<1:10:11, 29.87s/it, loss=9.332, acc=0.001][A
+Ep 1:  13%|█▎        | 21/162 [10:04<1:10:11, 29.87s/it, loss=9.246, acc=0.003][A
+Ep 1:  13%|█▎        | 21/162 [10:07<1:10:11, 29.87s/it, loss=9.285, acc=0.003][A
+Ep 1:  14%|█▎        | 22/162 [10:07<1:03:17, 27.13s/it, loss=9.285, acc=0.003][A
+Ep 1:  14%|█▎        | 22/162 [10:10<1:03:17, 27.13s/it, loss=8.990, acc=0.005][A
+Ep 1:  14%|█▎        | 22/162 [10:13<1:03:17, 27.13s/it, loss=8.640, acc=0.008][A
+Ep 1:  14%|█▎        | 22/162 [10:16<1:03:17, 27.13s/it, loss=8.088, acc=0.018][A
+Ep 1:  14%|█▎        | 22/162 [10:19<1:03:17, 27.13s/it, loss=7.903, acc=0.022][A
+Ep 1:  14%|█▎        | 22/162 [10:22<1:03:17, 27.13s/it, loss=8.008, acc=0.017][A
+Ep 1:  14%|█▎        | 22/162 [10:25<1:03:17, 27.13s/it, loss=7.924, acc=0.022][A
+Ep 1:  14%|█▎        | 22/162 [10:28<1:03:17, 27.13s/it, loss=7.763, acc=0.025][A
+Ep 1:  14%|█▍        | 23/162 [10:28<58:27, 25.23s/it, loss=7.763, acc=0.025]  [A
+Ep 1:  14%|█▍        | 23/162 [10:31<58:27, 25.23s/it, loss=8.664, acc=0.006][A
+Ep 1:  14%|█▍        | 23/162 [10:34<58:27, 25.23s/it, loss=8.672, acc=0.009][A
+Ep 1:  14%|█▍        | 23/162 [10:37<58:27, 25.23s/it, loss=8.691, acc=0.009][A
+Ep 1:  14%|█▍        | 23/162 [10:40<58:27, 25.23s/it, loss=8.394, acc=0.013][A
+Ep 1:  14%|█▍        | 23/162 [10:42<58:27, 25.23s/it, loss=8.313, acc=0.015][A
+Ep 1:  14%|█▍        | 23/162 [10:45<58:27, 25.23s/it, loss=8.338, acc=0.016][A
+Ep 1:  14%|█▍        | 23/162 [10:48<58:27, 25.23s/it, loss=8.356, acc=0.016][A
+Ep 1:  15%|█▍        | 24/162 [10:48<54:58, 23.90s/it, loss=8.356, acc=0.016][A
+Ep 1:  15%|█▍        | 24/162 [11:27<54:58, 23.90s/it, loss=8.236, acc=0.016][A
+Ep 1:  15%|█▍        | 24/162 [11:29<54:58, 23.90s/it, loss=8.253, acc=0.012][A
+Ep 1:  15%|█▍        | 24/162 [11:32<54:58, 23.90s/it, loss=8.171, acc=0.015][A
+Ep 1:  15%|█▍        | 24/162 [11:35<54:58, 23.90s/it, loss=7.866, acc=0.018][A
+Ep 1:  15%|█▍        | 24/162 [11:38<54:58, 23.90s/it, loss=7.802, acc=0.021][A
+Ep 1:  15%|█▍        | 24/162 [11:41<54:58, 23.90s/it, loss=8.043, acc=0.016][A
+Ep 1:  15%|█▍        | 24/162 [11:44<54:58, 23.90s/it, loss=8.013, acc=0.018][A
+Ep 1:  15%|█▌        | 25/162 [11:44<1:16:18, 33.42s/it, loss=8.013, acc=0.018][A
+Ep 1:  15%|█▌        | 25/162 [11:47<1:16:18, 33.42s/it, loss=8.650, acc=0.008][A
+Ep 1:  15%|█▌        | 25/162 [11:50<1:16:18, 33.42s/it, loss=8.571, acc=0.007][A
+Ep 1:  15%|█▌        | 25/162 [11:53<1:16:18, 33.42s/it, loss=8.644, acc=0.005][A
+Ep 1:  15%|█▌        | 25/162 [11:56<1:16:18, 33.42s/it, loss=8.042, acc=0.013][A
+Ep 1:  15%|█▌        | 25/162 [11:59<1:16:18, 33.42s/it, loss=7.572, acc=0.021][A
+Ep 1:  15%|█▌        | 25/162 [12:02<1:16:18, 33.42s/it, loss=7.671, acc=0.020][A
+Ep 1:  15%|█▌        | 25/162 [12:05<1:16:18, 33.42s/it, loss=7.573, acc=0.018][A
+Ep 1:  16%|█▌        | 26/162 [12:05<1:06:59, 29.55s/it, loss=7.573, acc=0.018][A
+Ep 1:  16%|█▌        | 26/162 [12:08<1:06:59, 29.55s/it, loss=9.404, acc=0.000][A
+Ep 1:  16%|█▌        | 26/162 [12:10<1:06:59, 29.55s/it, loss=9.261, acc=0.001][A
+Ep 1:  16%|█▌        | 26/162 [12:13<1:06:59, 29.55s/it, loss=9.248, acc=0.001][A
+Ep 1:  16%|█▌        | 26/162 [12:16<1:06:59, 29.55s/it, loss=9.229, acc=0.001][A
+Ep 1:  16%|█▌        | 26/162 [12:19<1:06:59, 29.55s/it, loss=9.124, acc=0.001][A
+Ep 1:  16%|█▌        | 26/162 [12:22<1:06:59, 29.55s/it, loss=9.172, acc=0.001][A
+Ep 1:  16%|█▌        | 26/162 [12:25<1:06:59, 29.55s/it, loss=9.268, acc=0.001][A
+Ep 1:  17%|█▋        | 27/162 [12:25<1:00:27, 26.87s/it, loss=9.268, acc=0.001][A
+Ep 1:  17%|█▋        | 27/162 [12:28<1:00:27, 26.87s/it, loss=8.510, acc=0.009][A
+Ep 1:  17%|█▋        | 27/162 [12:31<1:00:27, 26.87s/it, loss=8.551, acc=0.007][A
+Ep 1:  17%|█▋        | 27/162 [12:34<1:00:27, 26.87s/it, loss=8.339, acc=0.011][A
+Ep 1:  17%|█▋        | 27/162 [12:37<1:00:27, 26.87s/it, loss=8.486, acc=0.007][A
+Ep 1:  17%|█▋        | 27/162 [12:40<1:00:27, 26.87s/it, loss=8.593, acc=0.005][A
+Ep 1:  17%|█▋        | 27/162 [12:43<1:00:27, 26.87s/it, loss=8.487, acc=0.009][A
+Ep 1:  17%|█▋        | 27/162 [12:46<1:00:27, 26.87s/it, loss=8.254, acc=0.013][A
+Ep 1:  17%|█▋        | 28/162 [12:46<55:52, 25.02s/it, loss=8.254, acc=0.013]  [A
+Ep 1:  17%|█▋        | 28/162 [12:49<55:52, 25.02s/it, loss=8.841, acc=0.002][A
+Ep 1:  17%|█▋        | 28/162 [12:52<55:52, 25.02s/it, loss=8.861, acc=0.003][A
+Ep 1:  17%|█▋        | 28/162 [12:55<55:52, 25.02s/it, loss=8.907, acc=0.002][A
+Ep 1:  17%|█▋        | 28/162 [12:58<55:52, 25.02s/it, loss=9.008, acc=0.001][A
+Ep 1:  17%|█▋        | 28/162 [13:01<55:52, 25.02s/it, loss=8.905, acc=0.003][A
+Ep 1:  17%|█▋        | 28/162 [13:04<55:52, 25.02s/it, loss=8.859, acc=0.000][A
+Ep 1:  17%|█▋        | 28/162 [13:07<55:52, 25.02s/it, loss=8.831, acc=0.003][A
+Ep 1:  18%|█▊        | 29/162 [13:07<52:35, 23.73s/it, loss=8.831, acc=0.003][A
+Ep 1:  18%|█▊        | 29/162 [13:45<52:35, 23.73s/it, loss=9.080, acc=0.002][A
+Ep 1:  18%|█▊        | 29/162 [13:48<52:35, 23.73s/it, loss=9.036, acc=0.001][A
+Ep 1:  18%|█▊        | 29/162 [13:51<52:35, 23.73s/it, loss=8.960, acc=0.001][A
+Ep 1:  18%|█▊        | 29/162 [13:54<52:35, 23.73s/it, loss=8.848, acc=0.003][A
+Ep 1:  18%|█▊        | 29/162 [13:57<52:35, 23.73s/it, loss=8.706, acc=0.003][A
+Ep 1:  18%|█▊        | 29/162 [14:00<52:35, 23.73s/it, loss=8.688, acc=0.003][A
+Ep 1:  18%|█▊        | 29/162 [14:03<52:35, 23.73s/it, loss=8.658, acc=0.003][A
+Ep 1:  19%|█▊        | 30/162 [14:03<1:13:30, 33.41s/it, loss=8.658, acc=0.003][A
+Ep 1:  19%|█▊        | 30/162 [14:06<1:13:30, 33.41s/it, loss=8.958, acc=0.002][A
+Ep 1:  19%|█▊        | 30/162 [14:09<1:13:30, 33.41s/it, loss=9.007, acc=0.001][A
+Ep 1:  19%|█▊        | 30/162 [14:12<1:13:30, 33.41s/it, loss=9.020, acc=0.001][A
+Ep 1:  19%|█▊        | 30/162 [14:15<1:13:30, 33.41s/it, loss=9.015, acc=0.000][A
+Ep 1:  19%|█▊        | 30/162 [14:18<1:13:30, 33.41s/it, loss=8.962, acc=0.001][A
+Ep 1:  19%|█▊        | 30/162 [14:21<1:13:30, 33.41s/it, loss=8.898, acc=0.002][A
+Ep 1:  19%|█▊        | 30/162 [14:24<1:13:30, 33.41s/it, loss=8.922, acc=0.002][A
+Ep 1:  19%|█▉        | 31/162 [14:24<1:04:46, 29.67s/it, loss=8.922, acc=0.002][A
+Ep 1:  19%|█▉        | 31/162 [14:27<1:04:46, 29.67s/it, loss=8.530, acc=0.006][A
+Ep 1:  19%|█▉        | 31/162 [14:29<1:04:46, 29.67s/it, loss=8.277, acc=0.015][A
+Ep 1:  19%|█▉        | 31/162 [14:32<1:04:46, 29.67s/it, loss=8.046, acc=0.019][A
+Ep 1:  19%|█▉        | 31/162 [14:35<1:04:46, 29.67s/it, loss=7.880, acc=0.016][A
+Ep 1:  19%|█▉        | 31/162 [14:38<1:04:46, 29.67s/it, loss=7.845, acc=0.020][A
+Ep 1:  19%|█▉        | 31/162 [14:41<1:04:46, 29.67s/it, loss=7.878, acc=0.020][A
+Ep 1:  19%|█▉        | 31/162 [14:44<1:04:46, 29.67s/it, loss=7.839, acc=0.024][A
+Ep 1:  20%|█▉        | 32/162 [14:44<58:27, 26.98s/it, loss=7.839, acc=0.024]  [A
+Ep 1:  20%|█▉        | 32/162 [14:47<58:27, 26.98s/it, loss=8.740, acc=0.005][A
+Ep 1:  20%|█▉        | 32/162 [14:50<58:27, 26.98s/it, loss=8.065, acc=0.012][A
+Ep 1:  20%|█▉        | 32/162 [14:53<58:27, 26.98s/it, loss=7.784, acc=0.021][A
+Ep 1:  20%|█▉        | 32/162 [14:56<58:27, 26.98s/it, loss=7.463, acc=0.026][A
+Ep 1:  20%|█▉        | 32/162 [14:59<58:27, 26.98s/it, loss=7.811, acc=0.023][A
+Ep 1:  20%|█▉        | 32/162 [15:02<58:27, 26.98s/it, loss=7.699, acc=0.024][A
+Ep 1:  20%|█▉        | 32/162 [15:05<58:27, 26.98s/it, loss=7.735, acc=0.022][A
+Ep 1:  20%|██        | 33/162 [15:05<54:03, 25.14s/it, loss=7.735, acc=0.022][A
+Ep 1:  20%|██        | 33/162 [15:08<54:03, 25.14s/it, loss=8.058, acc=0.013][A
+Ep 1:  20%|██        | 33/162 [15:11<54:03, 25.14s/it, loss=8.195, acc=0.012][A
+Ep 1:  20%|██        | 33/162 [15:14<54:03, 25.14s/it, loss=8.246, acc=0.011][A
+Ep 1:  20%|██        | 33/162 [15:17<54:03, 25.14s/it, loss=8.251, acc=0.012][A
+Ep 1:  20%|██        | 33/162 [15:20<54:03, 25.14s/it, loss=8.066, acc=0.013][A
+Ep 1:  20%|██        | 33/162 [15:23<54:03, 25.14s/it, loss=8.122, acc=0.013][A
+Ep 1:  20%|██        | 33/162 [15:26<54:03, 25.14s/it, loss=8.109, acc=0.011][A
+Ep 1:  21%|██        | 34/162 [15:26<50:55, 23.87s/it, loss=8.109, acc=0.011][A
+Ep 1:  21%|██        | 34/162 [16:06<50:55, 23.87s/it, loss=8.507, acc=0.007][A
+Ep 1:  21%|██        | 34/162 [16:09<50:55, 23.87s/it, loss=8.313, acc=0.010][A
+Ep 1:  21%|██        | 34/162 [16:12<50:55, 23.87s/it, loss=8.285, acc=0.008][A
+Ep 1:  21%|██        | 34/162 [16:15<50:55, 23.87s/it, loss=8.517, acc=0.002][A
+Ep 1:  21%|██        | 34/162 [16:18<50:55, 23.87s/it, loss=8.451, acc=0.009][A
+Ep 1:  21%|██        | 34/162 [16:21<50:55, 23.87s/it, loss=7.547, acc=0.025][A
+Ep 1:  21%|██        | 34/162 [16:24<50:55, 23.87s/it, loss=7.052, acc=0.037][A
+Ep 1:  22%|██▏       | 35/162 [16:24<1:12:07, 34.07s/it, loss=7.052, acc=0.037][A
+Ep 1:  22%|██▏       | 35/162 [16:27<1:12:07, 34.07s/it, loss=8.259, acc=0.014][A16:37:08 [INFO] Memory Gate WM: 0.003187
+
+Ep 1:  22%|██▏       | 35/162 [16:30<1:12:07, 34.07s/it, loss=8.209, acc=0.013][A
+Ep 1:  22%|██▏       | 35/162 [16:33<1:12:07, 34.07s/it, loss=8.324, acc=0.010][A
+Ep 1:  22%|██▏       | 35/162 [16:36<1:12:07, 34.07s/it, loss=8.360, acc=0.009][A
+Ep 1:  22%|██▏       | 35/162 [16:39<1:12:07, 34.07s/it, loss=8.288, acc=0.011][A
+Ep 1:  22%|██▏       | 35/162 [16:41<1:12:07, 34.07s/it, loss=8.271, acc=0.011][A
+Ep 1:  22%|██▏       | 35/162 [16:44<1:12:07, 34.07s/it, loss=7.905, acc=0.020][A
+Ep 1:  22%|██▏       | 36/162 [16:44<1:03:00, 30.00s/it, loss=7.905, acc=0.020][A
+Ep 1:  22%|██▏       | 36/162 [16:47<1:03:00, 30.00s/it, loss=8.363, acc=0.003][A
+Ep 1:  22%|██▏       | 36/162 [16:50<1:03:00, 30.00s/it, loss=8.323, acc=0.004][A
+Ep 1:  22%|██▏       | 36/162 [16:53<1:03:00, 30.00s/it, loss=8.247, acc=0.007][A
+Ep 1:  22%|██▏       | 36/162 [16:56<1:03:00, 30.00s/it, loss=8.215, acc=0.007][A
+Ep 1:  22%|██▏       | 36/162 [16:59<1:03:00, 30.00s/it, loss=8.218, acc=0.007][A
+Ep 1:  22%|██▏       | 36/162 [17:02<1:03:00, 30.00s/it, loss=8.208, acc=0.009][A
+Ep 1:  22%|██▏       | 36/162 [17:05<1:03:00, 30.00s/it, loss=8.266, acc=0.007][A
+Ep 1:  23%|██▎       | 37/162 [17:05<56:40, 27.20s/it, loss=8.266, acc=0.007]  [A
+Ep 1:  23%|██▎       | 37/162 [17:08<56:40, 27.20s/it, loss=7.881, acc=0.014][A
+Ep 1:  23%|██▎       | 37/162 [17:11<56:40, 27.20s/it, loss=7.945, acc=0.012][A
+Ep 1:  23%|██▎       | 37/162 [17:14<56:40, 27.20s/it, loss=7.825, acc=0.014][A
+Ep 1:  23%|██▎       | 37/162 [17:17<56:40, 27.20s/it, loss=7.566, acc=0.026][A
+Ep 1:  23%|██▎       | 37/162 [17:20<56:40, 27.20s/it, loss=7.363, acc=0.032][A
+Ep 1:  23%|██▎       | 37/162 [17:23<56:40, 27.20s/it, loss=7.357, acc=0.029][A
+Ep 1:  23%|██▎       | 37/162 [17:26<56:40, 27.20s/it, loss=7.288, acc=0.030][A
+Ep 1:  23%|██▎       | 38/162 [17:26<52:14, 25.28s/it, loss=7.288, acc=0.030][A
+Ep 1:  23%|██▎       | 38/162 [17:29<52:14, 25.28s/it, loss=8.582, acc=0.002][A
+Ep 1:  23%|██▎       | 38/162 [17:32<52:14, 25.28s/it, loss=8.623, acc=0.003][A
+Ep 1:  23%|██▎       | 38/162 [17:35<52:14, 25.28s/it, loss=8.338, acc=0.009][A
+Ep 1:  23%|██▎       | 38/162 [17:38<52:14, 25.28s/it, loss=7.825, acc=0.024][A
+Ep 1:  23%|██▎       | 38/162 [17:41<52:14, 25.28s/it, loss=7.573, acc=0.024][A
+Ep 1:  23%|██▎       | 38/162 [17:44<52:14, 25.28s/it, loss=7.713, acc=0.022][A16:38:25 [INFO] Memory Gate WM: 0.003327
+
+Ep 1:  23%|██▎       | 38/162 [17:47<52:14, 25.28s/it, loss=7.967, acc=0.016][A
+Ep 1:  24%|██▍       | 39/162 [17:47<49:03, 23.93s/it, loss=7.967, acc=0.016][A
+Ep 1:  24%|██▍       | 39/162 [18:25<49:03, 23.93s/it, loss=9.102, acc=0.001][A
+Ep 1:  24%|██▍       | 39/162 [18:28<49:03, 23.93s/it, loss=9.105, acc=0.002][A
+Ep 1:  24%|██▍       | 39/162 [18:31<49:03, 23.93s/it, loss=9.055, acc=0.002][A
+Ep 1:  24%|██▍       | 39/162 [18:34<49:03, 23.93s/it, loss=8.978, acc=0.002][A
+Ep 1:  24%|██▍       | 39/162 [18:37<49:03, 23.93s/it, loss=8.968, acc=0.001][A
+Ep 1:  24%|██▍       | 39/162 [18:40<49:03, 23.93s/it, loss=9.007, acc=0.001][A
+Ep 1:  24%|██▍       | 39/162 [18:43<49:03, 23.93s/it, loss=8.998, acc=0.003][A
+Ep 1:  25%|██▍       | 40/162 [18:43<1:08:13, 33.55s/it, loss=8.998, acc=0.003][A
+Ep 1:  25%|██▍       | 40/162 [18:46<1:08:13, 33.55s/it, loss=8.318, acc=0.004][A
+Ep 1:  25%|██▍       | 40/162 [18:49<1:08:13, 33.55s/it, loss=8.349, acc=0.006][A
+Ep 1:  25%|██▍       | 40/162 [18:51<1:08:13, 33.55s/it, loss=8.306, acc=0.007][A
+Ep 1:  25%|██▍       | 40/162 [18:54<1:08:13, 33.55s/it, loss=8.353, acc=0.007][A
+Ep 1:  25%|██▍       | 40/162 [18:57<1:08:13, 33.55s/it, loss=8.367, acc=0.003][A
+Ep 1:  25%|██▍       | 40/162 [19:00<1:08:13, 33.55s/it, loss=8.223, acc=0.003][A
+Ep 1:  25%|██▍       | 40/162 [19:03<1:08:13, 33.55s/it, loss=8.074, acc=0.011][A
+Ep 1:  25%|██▌       | 41/162 [19:03<59:45, 29.64s/it, loss=8.074, acc=0.011]  [A
+Ep 1:  25%|██▌       | 41/162 [19:06<59:45, 29.64s/it, loss=8.378, acc=0.003][A
+Ep 1:  25%|██▌       | 41/162 [19:09<59:45, 29.64s/it, loss=8.272, acc=0.004][A
+Ep 1:  25%|██▌       | 41/162 [19:12<59:45, 29.64s/it, loss=8.190, acc=0.010][A
+Ep 1:  25%|██▌       | 41/162 [19:15<59:45, 29.64s/it, loss=8.250, acc=0.009][A
+Ep 1:  25%|██▌       | 41/162 [19:18<59:45, 29.64s/it, loss=8.377, acc=0.003][A
+Ep 1:  25%|██▌       | 41/162 [19:21<59:45, 29.64s/it, loss=8.185, acc=0.008][A
+Ep 1:  25%|██▌       | 41/162 [19:24<59:45, 29.64s/it, loss=8.254, acc=0.004][A
+Ep 1:  26%|██▌       | 42/162 [19:24<53:51, 26.93s/it, loss=8.254, acc=0.004][A
+Ep 1:  26%|██▌       | 42/162 [19:27<53:51, 26.93s/it, loss=8.140, acc=0.011][A
+Ep 1:  26%|██▌       | 42/162 [19:30<53:51, 26.93s/it, loss=8.170, acc=0.007][A
+Ep 1:  26%|██▌       | 42/162 [19:33<53:51, 26.93s/it, loss=7.897, acc=0.011][A
+Ep 1:  26%|██▌       | 42/162 [19:36<53:51, 26.93s/it, loss=7.878, acc=0.010][A
+Ep 1:  26%|██▌       | 42/162 [19:39<53:51, 26.93s/it, loss=7.867, acc=0.012][A
+Ep 1:  26%|██▌       | 42/162 [19:42<53:51, 26.93s/it, loss=7.933, acc=0.014][A
+Ep 1:  26%|██▌       | 42/162 [19:44<53:51, 26.93s/it, loss=7.998, acc=0.012][A
+Ep 1:  27%|██▋       | 43/162 [19:44<49:42, 25.06s/it, loss=7.998, acc=0.012][A
+Ep 1:  27%|██▋       | 43/162 [19:48<49:42, 25.06s/it, loss=8.528, acc=0.006][A
+Ep 1:  27%|██▋       | 43/162 [19:51<49:42, 25.06s/it, loss=8.541, acc=0.003][A
+Ep 1:  27%|██▋       | 43/162 [19:54<49:42, 25.06s/it, loss=8.465, acc=0.007][A
+Ep 1:  27%|██▋       | 43/162 [19:57<49:42, 25.06s/it, loss=8.555, acc=0.003][A
+Ep 1:  27%|██▋       | 43/162 [20:00<49:42, 25.06s/it, loss=8.567, acc=0.003][A
+Ep 1:  27%|██▋       | 43/162 [20:03<49:42, 25.06s/it, loss=8.507, acc=0.005][A
+Ep 1:  27%|██▋       | 43/162 [20:06<49:42, 25.06s/it, loss=8.484, acc=0.003][A
+Ep 1:  27%|██▋       | 44/162 [20:06<46:59, 23.90s/it, loss=8.484, acc=0.003][A
+Ep 1:  27%|██▋       | 44/162 [20:44<46:59, 23.90s/it, loss=8.674, acc=0.002][A
+Ep 1:  27%|██▋       | 44/162 [20:47<46:59, 23.90s/it, loss=8.649, acc=0.005][A
+Ep 1:  27%|██▋       | 44/162 [20:50<46:59, 23.90s/it, loss=8.610, acc=0.004][A
+Ep 1:  27%|██▋       | 44/162 [20:53<46:59, 23.90s/it, loss=8.526, acc=0.007][A
+Ep 1:  27%|██▋       | 44/162 [20:56<46:59, 23.90s/it, loss=8.525, acc=0.004][A
+Ep 1:  27%|██▋       | 44/162 [20:59<46:59, 23.90s/it, loss=8.437, acc=0.008][A
+Ep 1:  27%|██▋       | 44/162 [21:02<46:59, 23.90s/it, loss=8.119, acc=0.014][A
+Ep 1:  28%|██▊       | 45/162 [21:02<1:05:25, 33.55s/it, loss=8.119, acc=0.014][A
+Ep 1:  28%|██▊       | 45/162 [21:05<1:05:25, 33.55s/it, loss=8.342, acc=0.007][A
+Ep 1:  28%|██▊       | 45/162 [21:08<1:05:25, 33.55s/it, loss=8.289, acc=0.009][A
+Ep 1:  28%|██▊       | 45/162 [21:11<1:05:25, 33.55s/it, loss=8.060, acc=0.014][A
+Ep 1:  28%|██▊       | 45/162 [21:13<1:05:25, 33.55s/it, loss=7.990, acc=0.016][A
+Ep 1:  28%|██▊       | 45/162 [21:16<1:05:25, 33.55s/it, loss=8.086, acc=0.012][A
+Ep 1:  28%|██▊       | 45/162 [21:19<1:05:25, 33.55s/it, loss=8.150, acc=0.015][A
+Ep 1:  28%|██▊       | 45/162 [21:22<1:05:25, 33.55s/it, loss=8.191, acc=0.014][A
+Ep 1:  28%|██▊       | 46/162 [21:22<57:19, 29.65s/it, loss=8.191, acc=0.014]  [A
+Ep 1:  28%|██▊       | 46/162 [21:25<57:19, 29.65s/it, loss=8.382, acc=0.007][A
+Ep 1:  28%|██▊       | 46/162 [21:28<57:19, 29.65s/it, loss=8.158, acc=0.011][A
+Ep 1:  28%|██▊       | 46/162 [21:31<57:19, 29.65s/it, loss=7.731, acc=0.022][A
+Ep 1:  28%|██▊       | 46/162 [21:34<57:19, 29.65s/it, loss=7.620, acc=0.019][A
+Ep 1:  28%|██▊       | 46/162 [21:37<57:19, 29.65s/it, loss=7.643, acc=0.018][A
+Ep 1:  28%|██▊       | 46/162 [21:40<57:19, 29.65s/it, loss=7.909, acc=0.016][A
+Ep 1:  28%|██▊       | 46/162 [21:43<57:19, 29.65s/it, loss=7.881, acc=0.014][A
+Ep 1:  29%|██▉       | 47/162 [21:43<51:40, 26.96s/it, loss=7.881, acc=0.014][A
+Ep 1:  29%|██▉       | 47/162 [21:46<51:40, 26.96s/it, loss=8.344, acc=0.007][A
+Ep 1:  29%|██▉       | 47/162 [21:49<51:40, 26.96s/it, loss=8.087, acc=0.016][A
+Ep 1:  29%|██▉       | 47/162 [21:52<51:40, 26.96s/it, loss=7.973, acc=0.015][A
+Ep 1:  29%|██▉       | 47/162 [21:55<51:40, 26.96s/it, loss=7.924, acc=0.015][A
+Ep 1:  29%|██▉       | 47/162 [21:58<51:40, 26.96s/it, loss=8.180, acc=0.010][A
+Ep 1:  29%|██▉       | 47/162 [22:01<51:40, 26.96s/it, loss=8.214, acc=0.007][A
+Ep 1:  29%|██▉       | 47/162 [22:04<51:40, 26.96s/it, loss=8.166, acc=0.010][A
+Ep 1:  30%|██▉       | 48/162 [22:04<47:42, 25.11s/it, loss=8.166, acc=0.010][A
+Ep 1:  30%|██▉       | 48/162 [22:07<47:42, 25.11s/it, loss=7.910, acc=0.010][A
+Ep 1:  30%|██▉       | 48/162 [22:10<47:42, 25.11s/it, loss=7.966, acc=0.011][A
+Ep 1:  30%|██▉       | 48/162 [22:13<47:42, 25.11s/it, loss=7.926, acc=0.012][A
+Ep 1:  30%|██▉       | 48/162 [22:16<47:42, 25.11s/it, loss=7.969, acc=0.011][A
+Ep 1:  30%|██▉       | 48/162 [22:19<47:42, 25.11s/it, loss=8.011, acc=0.009][A
+Ep 1:  30%|██▉       | 48/162 [22:22<47:42, 25.11s/it, loss=7.903, acc=0.014][A
+Ep 1:  30%|██▉       | 48/162 [22:25<47:42, 25.11s/it, loss=7.942, acc=0.013][A
+Ep 1:  30%|███       | 49/162 [22:25<44:52, 23.83s/it, loss=7.942, acc=0.013][A
+Ep 1:  30%|███       | 49/162 [23:03<44:52, 23.83s/it, loss=7.913, acc=0.012][A
+Ep 1:  30%|███       | 49/162 [23:06<44:52, 23.83s/it, loss=7.730, acc=0.018][A
+Ep 1:  30%|███       | 49/162 [23:09<44:52, 23.83s/it, loss=7.512, acc=0.026][A
+Ep 1:  30%|███       | 49/162 [23:11<44:52, 23.83s/it, loss=7.509, acc=0.026][A
+Ep 1:  30%|███       | 49/162 [23:14<44:52, 23.83s/it, loss=7.703, acc=0.018][A
+Ep 1:  30%|███       | 49/162 [23:17<44:52, 23.83s/it, loss=7.693, acc=0.018][A
+Ep 1:  30%|███       | 49/162 [23:20<44:52, 23.83s/it, loss=7.645, acc=0.021][A
+Ep 1:  31%|███       | 50/162 [23:20<1:02:17, 33.37s/it, loss=7.645, acc=0.021][A
+Ep 1:  31%|███       | 50/162 [23:23<1:02:17, 33.37s/it, loss=8.388, acc=0.004][A
+Ep 1:  31%|███       | 50/162 [23:26<1:02:17, 33.37s/it, loss=8.250, acc=0.008][A
+Ep 1:  31%|███       | 50/162 [23:29<1:02:17, 33.37s/it, loss=8.077, acc=0.010][A
+Ep 1:  31%|███       | 50/162 [23:32<1:02:17, 33.37s/it, loss=8.072, acc=0.008][A
+Ep 1:  31%|███       | 50/162 [23:35<1:02:17, 33.37s/it, loss=8.162, acc=0.006][A
+Ep 1:  31%|███       | 50/162 [23:38<1:02:17, 33.37s/it, loss=8.092, acc=0.009][A
+Ep 1:  31%|███       | 50/162 [23:41<1:02:17, 33.37s/it, loss=7.973, acc=0.009][A
+Ep 1:  31%|███▏      | 51/162 [23:41<54:34, 29.50s/it, loss=7.973, acc=0.009]  [A
+Ep 1:  31%|███▏      | 51/162 [23:44<54:34, 29.50s/it, loss=8.458, acc=0.004][A
+Ep 1:  31%|███▏      | 51/162 [23:47<54:34, 29.50s/it, loss=8.364, acc=0.008][A
+Ep 1:  31%|███▏      | 51/162 [23:50<54:34, 29.50s/it, loss=8.153, acc=0.014][A
+Ep 1:  31%|███▏      | 51/162 [23:52<54:34, 29.50s/it, loss=8.171, acc=0.011][A
+Ep 1:  31%|███▏      | 51/162 [23:55<54:34, 29.50s/it, loss=8.412, acc=0.006][A
+Ep 1:  31%|███▏      | 51/162 [23:58<54:34, 29.50s/it, loss=8.258, acc=0.010][A
+Ep 1:  31%|███▏      | 51/162 [24:01<54:34, 29.50s/it, loss=8.243, acc=0.015][A
+Ep 1:  32%|███▏      | 52/162 [24:01<49:12, 26.84s/it, loss=8.243, acc=0.015][A
+Ep 1:  32%|███▏      | 52/162 [24:04<49:12, 26.84s/it, loss=7.744, acc=0.018][A
+Ep 1:  32%|███▏      | 52/162 [24:07<49:12, 26.84s/it, loss=7.779, acc=0.018][A
+Ep 1:  32%|███▏      | 52/162 [24:10<49:12, 26.84s/it, loss=7.638, acc=0.024][A
+Ep 1:  32%|███▏      | 52/162 [24:13<49:12, 26.84s/it, loss=7.551, acc=0.025][A
+Ep 1:  32%|███▏      | 52/162 [24:16<49:12, 26.84s/it, loss=7.537, acc=0.022][A
+Ep 1:  32%|███▏      | 52/162 [24:19<49:12, 26.84s/it, loss=7.749, acc=0.023][A
+Ep 1:  32%|███▏      | 52/162 [24:22<49:12, 26.84s/it, loss=7.684, acc=0.019][A
+Ep 1:  33%|███▎      | 53/162 [24:22<45:25, 25.00s/it, loss=7.684, acc=0.019][A
+Ep 1:  33%|███▎      | 53/162 [24:25<45:25, 25.00s/it, loss=8.226, acc=0.005][A
+Ep 1:  33%|███▎      | 53/162 [24:28<45:25, 25.00s/it, loss=8.283, acc=0.004][A
+Ep 1:  33%|███▎      | 53/162 [24:31<45:25, 25.00s/it, loss=8.267, acc=0.004][A
+Ep 1:  33%|███▎      | 53/162 [24:34<45:25, 25.00s/it, loss=7.867, acc=0.022][A
+Ep 1:  33%|███▎      | 53/162 [24:37<45:25, 25.00s/it, loss=7.439, acc=0.031][A
+Ep 1:  33%|███▎      | 53/162 [24:40<45:25, 25.00s/it, loss=7.208, acc=0.045][A
+Ep 1:  33%|███▎      | 53/162 [24:43<45:25, 25.00s/it, loss=7.554, acc=0.029][A
+Ep 1:  33%|███▎      | 54/162 [24:43<42:42, 23.73s/it, loss=7.554, acc=0.029][A
+Ep 1:  33%|███▎      | 54/162 [25:22<42:42, 23.73s/it, loss=8.237, acc=0.011][A
+Ep 1:  33%|███▎      | 54/162 [25:25<42:42, 23.73s/it, loss=8.331, acc=0.011][A
+Ep 1:  33%|███▎      | 54/162 [25:28<42:42, 23.73s/it, loss=8.304, acc=0.012][A
+Ep 1:  33%|███▎      | 54/162 [25:31<42:42, 23.73s/it, loss=7.944, acc=0.019][A
+Ep 1:  33%|███▎      | 54/162 [25:34<42:42, 23.73s/it, loss=8.039, acc=0.018][A
+Ep 1:  33%|███▎      | 54/162 [25:36<42:42, 23.73s/it, loss=8.165, acc=0.011][A
+Ep 1:  33%|███▎      | 54/162 [25:39<42:42, 23.73s/it, loss=8.153, acc=0.009][A
+Ep 1:  34%|███▍      | 55/162 [25:39<59:54, 33.59s/it, loss=8.153, acc=0.009][A
+Ep 1:  34%|███▍      | 55/162 [25:42<59:54, 33.59s/it, loss=8.417, acc=0.005][A
+Ep 1:  34%|███▍      | 55/162 [25:45<59:54, 33.59s/it, loss=8.428, acc=0.004][A
+Ep 1:  34%|███▍      | 55/162 [25:48<59:54, 33.59s/it, loss=8.426, acc=0.007][A
+Ep 1:  34%|███▍      | 55/162 [25:51<59:54, 33.59s/it, loss=8.359, acc=0.009][A
+Ep 1:  34%|███▍      | 55/162 [25:54<59:54, 33.59s/it, loss=8.356, acc=0.007][A
+Ep 1:  34%|███▍      | 55/162 [25:57<59:54, 33.59s/it, loss=8.309, acc=0.007][A
+Ep 1:  34%|███▍      | 55/162 [26:00<59:54, 33.59s/it, loss=7.871, acc=0.022][A
+Ep 1:  35%|███▍      | 56/162 [26:00<52:25, 29.68s/it, loss=7.871, acc=0.022][A
+Ep 1:  35%|███▍      | 56/162 [26:03<52:25, 29.68s/it, loss=7.910, acc=0.017][A
+Ep 1:  35%|███▍      | 56/162 [26:06<52:25, 29.68s/it, loss=8.088, acc=0.014][A
+Ep 1:  35%|███▍      | 56/162 [26:09<52:25, 29.68s/it, loss=8.151, acc=0.009][A
+Ep 1:  35%|███▍      | 56/162 [26:12<52:25, 29.68s/it, loss=8.051, acc=0.011][A
+Ep 1:  35%|███▍      | 56/162 [26:15<52:25, 29.68s/it, loss=7.835, acc=0.016][A
+Ep 1:  35%|███▍      | 56/162 [26:18<52:25, 29.68s/it, loss=7.516, acc=0.029][A
+Ep 1:  35%|███▍      | 56/162 [26:21<52:25, 29.68s/it, loss=7.491, acc=0.030][A
+Ep 1:  35%|███▌      | 57/162 [26:21<47:10, 26.96s/it, loss=7.491, acc=0.030][A
+Ep 1:  35%|███▌      | 57/162 [26:24<47:10, 26.96s/it, loss=8.266, acc=0.005][A
+Ep 1:  35%|███▌      | 57/162 [26:26<47:10, 26.96s/it, loss=8.200, acc=0.005][A
+Ep 1:  35%|███▌      | 57/162 [26:29<47:10, 26.96s/it, loss=8.075, acc=0.008][A
+Ep 1:  35%|███▌      | 57/162 [26:32<47:10, 26.96s/it, loss=8.097, acc=0.014][A
+Ep 1:  35%|███▌      | 57/162 [26:35<47:10, 26.96s/it, loss=8.058, acc=0.009][A
+Ep 1:  35%|███▌      | 57/162 [26:39<47:10, 26.96s/it, loss=8.076, acc=0.011][A
+Ep 1:  35%|███▌      | 57/162 [26:42<47:10, 26.96s/it, loss=7.983, acc=0.011][A
+Ep 1:  36%|███▌      | 58/162 [26:42<43:41, 25.20s/it, loss=7.983, acc=0.011][A
+Ep 1:  36%|███▌      | 58/162 [26:45<43:41, 25.20s/it, loss=8.380, acc=0.009][A
+Ep 1:  36%|███▌      | 58/162 [26:48<43:41, 25.20s/it, loss=8.407, acc=0.005][A
+Ep 1:  36%|███▌      | 58/162 [26:51<43:41, 25.20s/it, loss=8.468, acc=0.004][A
+Ep 1:  36%|███▌      | 58/162 [26:54<43:41, 25.20s/it, loss=8.486, acc=0.004][A
+Ep 1:  36%|███▌      | 58/162 [26:57<43:41, 25.20s/it, loss=8.534, acc=0.003][A
+Ep 1:  36%|███▌      | 58/162 [27:00<43:41, 25.20s/it, loss=8.412, acc=0.006][A
+Ep 1:  36%|███▌      | 58/162 [27:03<43:41, 25.20s/it, loss=8.097, acc=0.013][A
+Ep 1:  36%|███▋      | 59/162 [27:03<41:00, 23.89s/it, loss=8.097, acc=0.013][A
+Ep 1:  36%|███▋      | 59/162 [27:41<41:00, 23.89s/it, loss=7.905, acc=0.013][A
+Ep 1:  36%|███▋      | 59/162 [27:44<41:00, 23.89s/it, loss=7.857, acc=0.016][A
+Ep 1:  36%|███▋      | 59/162 [27:47<41:00, 23.89s/it, loss=7.817, acc=0.012][A
+Ep 1:  36%|███▋      | 59/162 [27:50<41:00, 23.89s/it, loss=7.384, acc=0.026][A
+Ep 1:  36%|███▋      | 59/162 [27:53<41:00, 23.89s/it, loss=7.111, acc=0.040][A
+Ep 1:  36%|███▋      | 59/162 [27:56<41:00, 23.89s/it, loss=7.230, acc=0.028][A
+Ep 1:  36%|███▋      | 59/162 [27:59<41:00, 23.89s/it, loss=7.232, acc=0.034][A
+Ep 1:  37%|███▋      | 60/162 [27:59<57:08, 33.62s/it, loss=7.232, acc=0.034][A
+Ep 1:  37%|███▋      | 60/162 [28:02<57:08, 33.62s/it, loss=8.158, acc=0.010][A
+Ep 1:  37%|███▋      | 60/162 [28:05<57:08, 33.62s/it, loss=7.927, acc=0.019][A
+Ep 1:  37%|███▋      | 60/162 [28:08<57:08, 33.62s/it, loss=8.133, acc=0.012][A
+Ep 1:  37%|███▋      | 60/162 [28:11<57:08, 33.62s/it, loss=8.150, acc=0.010][A
+Ep 1:  37%|███▋      | 60/162 [28:13<57:08, 33.62s/it, loss=7.769, acc=0.020][A
+Ep 1:  37%|███▋      | 60/162 [28:16<57:08, 33.62s/it, loss=7.225, acc=0.042][A
+Ep 1:  37%|███▋      | 60/162 [28:19<57:08, 33.62s/it, loss=6.606, acc=0.057][A
+Ep 1:  38%|███▊      | 61/162 [28:19<49:57, 29.68s/it, loss=6.606, acc=0.057][A
+Ep 1:  38%|███▊      | 61/162 [28:22<49:57, 29.68s/it, loss=8.704, acc=0.002][A
+Ep 1:  38%|███▊      | 61/162 [28:25<49:57, 29.68s/it, loss=8.816, acc=0.000][A
+Ep 1:  38%|███▊      | 61/162 [28:28<49:57, 29.68s/it, loss=8.787, acc=0.001][A
+Ep 1:  38%|███▊      | 61/162 [28:31<49:57, 29.68s/it, loss=8.773, acc=0.000][A
+Ep 1:  38%|███▊      | 61/162 [28:34<49:57, 29.68s/it, loss=8.708, acc=0.001][A
+Ep 1:  38%|███▊      | 61/162 [28:37<49:57, 29.68s/it, loss=8.736, acc=0.001][A
+Ep 1:  38%|███▊      | 61/162 [28:40<49:57, 29.68s/it, loss=8.708, acc=0.002][A
+Ep 1:  38%|███▊      | 62/162 [28:40<44:55, 26.96s/it, loss=8.708, acc=0.002][A
+Ep 1:  38%|███▊      | 62/162 [28:43<44:55, 26.96s/it, loss=8.366, acc=0.009][A
+Ep 1:  38%|███▊      | 62/162 [28:46<44:55, 26.96s/it, loss=8.316, acc=0.008][A
+Ep 1:  38%|███▊      | 62/162 [28:49<44:55, 26.96s/it, loss=8.359, acc=0.008][A
+Ep 1:  38%|███▊      | 62/162 [28:52<44:55, 26.96s/it, loss=8.334, acc=0.012][A
+Ep 1:  38%|███▊      | 62/162 [28:55<44:55, 26.96s/it, loss=8.284, acc=0.008][A
+Ep 1:  38%|███▊      | 62/162 [28:58<44:55, 26.96s/it, loss=8.076, acc=0.014][A
+Ep 1:  38%|███▊      | 62/162 [29:01<44:55, 26.96s/it, loss=8.410, acc=0.008][A
+Ep 1:  39%|███▉      | 63/162 [29:01<41:24, 25.09s/it, loss=8.410, acc=0.008][A
+Ep 1:  39%|███▉      | 63/162 [29:04<41:24, 25.09s/it, loss=8.272, acc=0.012][A
+Ep 1:  39%|███▉      | 63/162 [29:07<41:24, 25.09s/it, loss=8.190, acc=0.011][A
+Ep 1:  39%|███▉      | 63/162 [29:10<41:24, 25.09s/it, loss=8.250, acc=0.008][A
+Ep 1:  39%|███▉      | 63/162 [29:13<41:24, 25.09s/it, loss=8.282, acc=0.008][A
+Ep 1:  39%|███▉      | 63/162 [29:15<41:24, 25.09s/it, loss=8.249, acc=0.009][A
+Ep 1:  39%|███▉      | 63/162 [29:18<41:24, 25.09s/it, loss=8.213, acc=0.006][A
+Ep 1:  39%|███▉      | 63/162 [29:21<41:24, 25.09s/it, loss=8.282, acc=0.004][A
+Ep 1:  40%|███▉      | 64/162 [29:21<38:52, 23.80s/it, loss=8.282, acc=0.004][A
+Ep 1:  40%|███▉      | 64/162 [30:02<38:52, 23.80s/it, loss=8.079, acc=0.007][A
+Ep 1:  40%|███▉      | 64/162 [30:04<38:52, 23.80s/it, loss=7.879, acc=0.014][A
+Ep 1:  40%|███▉      | 64/162 [30:07<38:52, 23.80s/it, loss=7.893, acc=0.011][A
+Ep 1:  40%|███▉      | 64/162 [30:10<38:52, 23.80s/it, loss=7.687, acc=0.015][A
+Ep 1:  40%|███▉      | 64/162 [30:13<38:52, 23.80s/it, loss=7.270, acc=0.026][A
+Ep 1:  40%|███▉      | 64/162 [30:16<38:52, 23.80s/it, loss=7.162, acc=0.028][A
+Ep 1:  40%|███▉      | 64/162 [30:19<38:52, 23.80s/it, loss=6.870, acc=0.033][A
+Ep 1:  40%|████      | 65/162 [30:19<54:53, 33.95s/it, loss=6.870, acc=0.033][A
+Ep 1:  40%|████      | 65/162 [30:22<54:53, 33.95s/it, loss=8.527, acc=0.002][A
+Ep 1:  40%|████      | 65/162 [30:25<54:53, 33.95s/it, loss=8.451, acc=0.003][A
+Ep 1:  40%|████      | 65/162 [30:28<54:53, 33.95s/it, loss=8.296, acc=0.004][A
+Ep 1:  40%|████      | 65/162 [30:31<54:53, 33.95s/it, loss=8.304, acc=0.005][A
+Ep 1:  40%|████      | 65/162 [30:34<54:53, 33.95s/it, loss=8.168, acc=0.005][A
+Ep 1:  40%|████      | 65/162 [30:37<54:53, 33.95s/it, loss=8.025, acc=0.012][A
+Ep 1:  40%|████      | 65/162 [30:40<54:53, 33.95s/it, loss=8.081, acc=0.009][A
+Ep 1:  41%|████      | 66/162 [30:40<47:52, 29.92s/it, loss=8.081, acc=0.009][A
+Ep 1:  41%|████      | 66/162 [30:43<47:52, 29.92s/it, loss=8.184, acc=0.004][A
+Ep 1:  41%|████      | 66/162 [30:45<47:52, 29.92s/it, loss=8.256, acc=0.005][A
+Ep 1:  41%|████      | 66/162 [30:48<47:52, 29.92s/it, loss=8.207, acc=0.006][A
+Ep 1:  41%|████      | 66/162 [30:51<47:52, 29.92s/it, loss=8.219, acc=0.005][A
+Ep 1:  41%|████      | 66/162 [30:54<47:52, 29.92s/it, loss=8.238, acc=0.005][A
+Ep 1:  41%|████      | 66/162 [30:57<47:52, 29.92s/it, loss=8.222, acc=0.004][A
+Ep 1:  41%|████      | 66/162 [31:00<47:52, 29.92s/it, loss=8.176, acc=0.004][A
+Ep 1:  41%|████▏     | 67/162 [31:00<42:59, 27.15s/it, loss=8.176, acc=0.004][A
+Ep 1:  41%|████▏     | 67/162 [31:03<42:59, 27.15s/it, loss=8.001, acc=0.017][A
+Ep 1:  41%|████▏     | 67/162 [31:06<42:59, 27.15s/it, loss=7.989, acc=0.016][A
+Ep 1:  41%|████▏     | 67/162 [31:09<42:59, 27.15s/it, loss=8.056, acc=0.011][A
+Ep 1:  41%|████▏     | 67/162 [31:12<42:59, 27.15s/it, loss=7.989, acc=0.016][A
+Ep 1:  41%|████▏     | 67/162 [31:15<42:59, 27.15s/it, loss=7.942, acc=0.018][A
+Ep 1:  41%|████▏     | 67/162 [31:18<42:59, 27.15s/it, loss=8.074, acc=0.010][A
+Ep 1:  41%|████▏     | 67/162 [31:21<42:59, 27.15s/it, loss=8.034, acc=0.009][A
+Ep 1:  42%|████▏     | 68/162 [31:21<39:29, 25.21s/it, loss=8.034, acc=0.009][A
+Ep 1:  42%|████▏     | 68/162 [31:24<39:29, 25.21s/it, loss=8.202, acc=0.006][A
+Ep 1:  42%|████▏     | 68/162 [31:27<39:29, 25.21s/it, loss=8.269, acc=0.006][A
+Ep 1:  42%|████▏     | 68/162 [31:30<39:29, 25.21s/it, loss=8.178, acc=0.008][A
+Ep 1:  42%|████▏     | 68/162 [31:33<39:29, 25.21s/it, loss=8.046, acc=0.010][A
+Ep 1:  42%|████▏     | 68/162 [31:36<39:29, 25.21s/it, loss=8.179, acc=0.007][A
+Ep 1:  42%|████▏     | 68/162 [31:39<39:29, 25.21s/it, loss=8.215, acc=0.007][A
+Ep 1:  42%|████▏     | 68/162 [31:42<39:29, 25.21s/it, loss=8.217, acc=0.005][A
+Ep 1:  43%|████▎     | 69/162 [31:42<37:00, 23.88s/it, loss=8.217, acc=0.005][AW1215 16:52:23.540000 2063617 site-packages/torch/distributed/elastic/agent/server/api.py:719] Received Signals.SIGTERM death signal, shutting down workers
+W1215 16:52:23.542000 2063617 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 2064006 closing signal SIGTERM
+W1215 16:52:23.542000 2063617 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 2064007 closing signal SIGTERM
+W1215 16:52:23.542000 2063617 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 2064008 closing signal SIGTERM
+W1215 16:52:23.543000 2063617 site-packages/torch/distributed/elastic/multiprocessing/api.py:900] Sending process 2064009 closing signal SIGTERM
 Traceback (most recent call last):
   File "/home/user/miniconda3/envs/f1/bin/accelerate", line 7, in <module>
     sys.exit(main())
@@ -180,4 +619,4 @@ Traceback (most recent call last):
     time.sleep(monitor_interval)
   File "/home/user/miniconda3/envs/f1/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 84, in _terminate_process_handler
     raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
-torch.distributed.elastic.multiprocessing.api.SignalException: Process 1609536 got signal: 15
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 2063617 got signal: 15

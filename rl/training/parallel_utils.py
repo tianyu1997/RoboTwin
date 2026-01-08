@@ -28,7 +28,7 @@ warnings.filterwarnings(
     category=UserWarning,
     module="torch.distributed.distributed_c10d"
 )
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Union, Tuple
 from collections import deque
 import threading
 import copy
@@ -262,22 +262,27 @@ class SequentialEpisodeBuffer:
         self,
         batch_size: int,
         sequence_length: int = 1,
-    ) -> List[List[Dict[str, Any]]]:
+        return_start_indices: bool = False,
+    ) -> Union[List[List[Dict[str, Any]]], Tuple[List[List[Dict[str, Any]]], List[int]]]:
         """
         Sample batch of sequential transitions.
         
         Args:
             batch_size: Number of sequences to sample
             sequence_length: Length of each sequence (1 = single transitions)
+            return_start_indices: If True, return tuple (sequences, start_indices)
             
         Returns:
-            List of sequences, each sequence is a list of consecutive transitions
+            List of sequences, or (sequences, start_indices) if requested
         """
         with self._lock:
             if len(self.episodes) == 0:
+                if return_start_indices:
+                    return [], []
                 return []
             
             sequences = []
+            start_indices = []
             attempts = 0
             max_attempts = batch_size * 10
             
@@ -295,7 +300,10 @@ class SequentialEpisodeBuffer:
                 start_idx = np.random.randint(len(episode) - sequence_length + 1)
                 sequence = episode[start_idx:start_idx + sequence_length]
                 sequences.append(sequence)
+                start_indices.append(start_idx)
             
+            if return_start_indices:
+                return sequences, start_indices
             return sequences
     
     def sample_batch(self, batch_size: int) -> List[Dict[str, Any]]:
@@ -325,6 +333,79 @@ class SequentialEpisodeBuffer:
         with self._lock:
             self.episodes.clear()
             self.total_transitions = 0
+
+
+class WeightedEpisodeBuffer:
+    """
+    Buffer that manages multiple SequentialEpisodeBuffers with sampling weights.
+    """
+    def __init__(self, buffers: List[SequentialEpisodeBuffer], weights: List[float]):
+        self.buffers = buffers
+        self.weights = np.array(weights, dtype=np.float32)
+        self.weights /= self.weights.sum()  # Normalize
+        
+    def add_episode(self, episode: List[Dict[str, Any]], buffer_idx: int = 0):
+        """Add episode to specific buffer."""
+        self.buffers[buffer_idx].add_episode(episode)
+        
+    def sample_sequential_batch(
+        self,
+        batch_size: int,
+        sequence_length: int = 1,
+        return_start_indices: bool = False,
+    ) -> Union[List[List[Dict[str, Any]]], Tuple[List[List[Dict[str, Any]]], List[int]]]:
+        """Sample batch from buffers according to weights."""
+        # Determine how many samples from each buffer
+        # We sample buffer indices for the whole batch
+        buffer_indices = np.random.choice(len(self.buffers), size=batch_size, p=self.weights)
+        
+        all_sequences = []
+        all_start_indices = []
+        
+        # Group by buffer index to minimize calls
+        for buf_idx in range(len(self.buffers)):
+            count = np.sum(buffer_indices == buf_idx)
+            if count > 0:
+                if return_start_indices:
+                    seqs, idxs = self.buffers[buf_idx].sample_sequential_batch(
+                        count, sequence_length, return_start_indices=True
+                    )
+                    all_sequences.extend(seqs)
+                    all_start_indices.extend(idxs)
+                else:
+                    seqs = self.buffers[buf_idx].sample_sequential_batch(
+                        count, sequence_length
+                    )
+                    all_sequences.extend(seqs)
+        
+        # Shuffle the result so batch isn't ordered by buffer
+        # (Though for training it might not matter much if batch is shuffled, 
+        # but usually good practice)
+        perm = np.random.permutation(len(all_sequences))
+        all_sequences = [all_sequences[i] for i in perm]
+        
+        if return_start_indices:
+            all_start_indices = [all_start_indices[i] for i in perm]
+            return all_sequences, all_start_indices
+            
+        return all_sequences
+
+    def __len__(self) -> int:
+        return sum(len(b) for b in self.buffers)
+
+    @property
+    def episodes(self) -> List[List[Dict[str, Any]]]:
+        """Return all episodes from all buffers concatenated."""
+        all_episodes = []
+        for b in self.buffers:
+            all_episodes.extend(b.episodes)
+        return all_episodes
+
+    def sample_batch(self, batch_size: int) -> List[Dict[str, Any]]:
+        """Sample random single transitions."""
+        sequences = self.sample_sequential_batch(batch_size, sequence_length=1)
+        return [seq[0] for seq in sequences if seq]
+
 
 
 # =============================================================================
@@ -447,6 +528,39 @@ class ParallelEnvCollector:
             for env_idx in range(self.num_envs):
                 obs_i = self._get_single_obs(env_idx)
                 next_obs_i = self._extract_single_obs(next_obs, env_idx)
+                
+                # Handle final observation for done environments (VectorEnv auto-resets)
+                if dones[env_idx]:
+                    final_obs = None
+                    # Check in infos dict (standard gymnasium VectorEnv)
+                    if isinstance(infos, dict):
+                        if "final_observation" in infos:
+                            # Check if the specific element is not None (it should be valid if done)
+                            candidate = infos["final_observation"][env_idx]
+                            # In some vector envs, candidate might be a valid obs even if it looks falsey? No, usually dict or array.
+                            if candidate is not None:
+                                final_obs = candidate
+                        elif "terminal_observation" in infos: # Compatibility
+                             candidate = infos["terminal_observation"][env_idx]
+                             if candidate is not None:
+                                final_obs = candidate
+                                
+                    # Check in infos list (if it's a list of dicts)
+                    elif isinstance(infos, (list, tuple)) and env_idx < len(infos):
+                        if "final_observation" in infos[env_idx]:
+                            final_obs = infos[env_idx]["final_observation"]
+                        elif "terminal_observation" in infos[env_idx]:
+                            final_obs = infos[env_idx]["terminal_observation"]
+                            
+                    if final_obs is not None:
+                        next_obs_i = final_obs
+                    else:
+                        # Fallback: If we can't find final_observation, use current observation as approximation
+                        # This prevents "teleporting" to the reset state of the next episode
+                        if not hasattr(self, "_warned_missing_final_obs"):
+                            logger.warning(f"Env {env_idx} done but no final_observation found. Using current obs as terminal obs fallback. Infos keys: {infos.keys() if isinstance(infos, dict) else 'list'}")
+                            self._warned_missing_final_obs = True
+                        next_obs_i = copy.deepcopy(obs_i)
                 
                 # Get action that was actually executed
                 action_executed = actions[env_idx]

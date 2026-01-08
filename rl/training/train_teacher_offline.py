@@ -55,6 +55,7 @@ from rl.training.parallel_utils import (
     AcceleratorWrapper,
     create_accelerator,
     SequentialEpisodeBuffer,
+    WeightedEpisodeBuffer,
     print_rank0,
 )
 
@@ -74,8 +75,8 @@ def parse_args():
                        help="Path to RL training config YAML file")
     parser.add_argument("--model_config", type=str, default=None,
                        help="Override model config file path")
-    parser.add_argument("--data_dir", type=str, default="./rl/data/teacher_offline",
-                       help="Directory containing collected .pt episode files")
+    parser.add_argument("--data_dir", type=str, default=None,
+                       help="Directory containing collected .pt episode files (optional if datasets defined in config)")
     parser.add_argument("--output_dir", type=str, default=None,
                        help="Directory to save checkpoints")
     
@@ -113,21 +114,20 @@ class OfflineTrainer:
         policy_config,
         rl_config: OmegaConf,
         model_config_file: str,
-        data_dir: str,
+        data_dir: Optional[str] = None,
         device: str = "cuda",
         accelerator: Optional[AcceleratorWrapper] = None,
     ):
         self.policy = policy
         self.policy_config = policy_config
         self.rl_config = rl_config
-        self.data_dir = Path(data_dir)
+        self.data_dir = Path(data_dir) if data_dir else None
         self.device = device
         self.accelerator = accelerator
         
         # Output dir
         teacher_config = rl_config.get("teacher", {})
         self.output_dir = Path(teacher_config.get("output_dir", "./outputs/teacher_offline"))
-        print(f"[INFO] Output Directory: {self.output_dir}")
         if self._is_main_process():
             self.output_dir.mkdir(parents=True, exist_ok=True)
             
@@ -175,8 +175,15 @@ class OfflineTrainer:
         if self.accelerator:
             self.policy, self.optimizer = self.accelerator.prepare(self.policy, self.optimizer)
             
-        # Buffer
-        self.replay_buffer = SequentialEpisodeBuffer(max_episodes=10000, max_transitions=1000000)
+        # Buffer setup
+        self.datasets_config = teacher_config.get("datasets", None)
+        if self.datasets_config:
+            self._print(f"Using mixed datasets: {self.datasets_config}")
+            buffers = [SequentialEpisodeBuffer(max_episodes=10000, max_transitions=1000000) for _ in self.datasets_config]
+            weights = [d.get("weight", 1.0) for d in self.datasets_config]
+            self.replay_buffer = WeightedEpisodeBuffer(buffers, weights)
+        else:
+            self.replay_buffer = SequentialEpisodeBuffer(max_episodes=10000, max_transitions=1000000)
         
         # Batch builder
         self.batch_builder = BatchBuilder(
@@ -216,25 +223,50 @@ class OfflineTrainer:
 
     def load_data(self):
         """
-        Load .pt files from data_dir into replay buffer.
+        Load .pt files from data_dir(s) into replay buffer.
         In DDP mode, only loads the subset of files assigned to this process.
         """
-        self._print(f"Loading data from {self.data_dir}...")
-        files = sorted(list(self.data_dir.glob("episode_*.pt")))
+        if self.datasets_config:
+            total_count = 0
+            for i, ds_cfg in enumerate(self.datasets_config):
+                path = Path(ds_cfg["path"])
+                self._print(f"Loading dataset {i} from {path} (weight={ds_cfg.get('weight', 1.0)})...")
+                count = self._load_data_from_dir(path, buffer_idx=i)
+                total_count += count
+            self._print(f"Total loaded {total_count} episodes across all datasets.")
+        else:
+            if self.data_dir is None:
+                raise ValueError("No data_dir provided and no datasets configured in rl_config.")
+            self._print(f"Loading data from {self.data_dir}...")
+            count = self._load_data_from_dir(self.data_dir)
+            self._print(f"Loaded {count} episodes (per process). Buffer size: {len(self.replay_buffer)} transitions.")
+
+    def _load_data_from_dir(self, data_dir: Path, buffer_idx: Optional[int] = None) -> int:
+        files = sorted(list(data_dir.glob("episode_*.pt")))
         if not files:
-            raise ValueError(f"No episode_*.pt files found in {self.data_dir}")
+            logger.warning(f"No episode_*.pt files found in {data_dir}")
+            return 0
         
         # DDP Sharding: Only load files assigned to this process
         if self.accelerator and self.accelerator.is_distributed:
             total_files = len(files)
             files = files[self.accelerator.process_index::self.accelerator.num_processes]
-            logger.info(f"Rank {self.accelerator.process_index}: Loading {len(files)}/{total_files} episodes")
+            logger.info(f"Rank {self.accelerator.process_index}: Loading {len(files)}/{total_files} episodes from {data_dir}")
         
         count = 0
-        for f in tqdm(files, desc="Loading episodes", disable=not self._is_main_process()):
+        for f in tqdm(files, desc=f"Loading {data_dir.name}", disable=not self._is_main_process()):
             try:
                 episode = torch.load(f, weights_only=False)
-                self.replay_buffer.add_episode(episode)
+                
+                # Drop the last transition to avoid "teleporting" bug in old data
+                # and because predicting beyond the final step is ambiguous.
+                if len(episode) > 0:
+                    episode = episode[:-1]
+                
+                if buffer_idx is not None:
+                    self.replay_buffer.add_episode(episode, buffer_idx=buffer_idx)
+                else:
+                    self.replay_buffer.add_episode(episode)
                 count += 1
             except Exception as e:
                 logger.warning(f"Failed to load {f}: {e}")
@@ -242,9 +274,13 @@ class OfflineTrainer:
         if self.accelerator and self.accelerator.is_distributed:
             self.accelerator.wait_for_everyone()
             
-        self._print(f"Loaded {count} episodes (per process). Buffer size: {len(self.replay_buffer)} transitions.")
+        return count
 
-    def _init_memory_state(self, batch_size: int) -> torch.Tensor:
+    def _init_memory_state(self, batch_size: int) -> Any:
+        memory_type = getattr(self.policy_config, "memory_type", "gru")
+        if memory_type == "kv":
+            return None
+            
         return torch.zeros(
             self.memory_num_layers, batch_size, self.memory_hidden,
             device=self.device, dtype=torch.float32
@@ -284,7 +320,8 @@ class OfflineTrainer:
             
         return {"loss": loss.item(), "accuracy": loss_dict.get("wm_acc_mean", torch.tensor(0.0)).item()}
 
-    def train_step_sequential(self, sequences: List[List[Dict[str, Any]]], initial_memory_state: Optional[torch.Tensor] = None) -> Dict[str, Any]:
+
+    def train_step_sequential(self, sequences: List[List[Dict[str, Any]]], initial_memory_state: Optional[torch.Tensor] = None, episode_step_start: int = 0) -> Dict[str, Any]:
         # Simplified sequential step (similar to original but condensed)
         self.optimizer.zero_grad()
         policy = self.accelerator.unwrap_model(self.policy) if self.accelerator else self.policy
@@ -313,12 +350,26 @@ class OfflineTrainer:
             memory_state = memory_state.detach()
             
         total_loss = 0.0
+        total_raw_loss = 0.0
         total_acc = 0.0
         valid_steps = 0
         
         output_memory_state = None
         
         for step_idx in range(seq_length):
+            current_episode_step = episode_step_start + step_idx
+            
+            # Loss Schedule: Down-weight early steps in the episode
+            warmup_steps = self.config.loss_warmup_steps
+            start_weight = self.config.loss_warmup_start_weight
+            
+            if current_episode_step < warmup_steps:
+                # Linear interpolation from start_weight to 1.0
+                progress = current_episode_step / warmup_steps
+                loss_weight = start_weight + (1.0 - start_weight) * progress
+            else:
+                loss_weight = 1.0
+            
             step_transitions = [seq[step_idx] for seq in sequences]
             batch = self.batch_builder.build_batch(step_transitions, include_memory_states=True)
             batch["initial_memory_state"] = memory_state.to(self.device)
@@ -337,11 +388,16 @@ class OfflineTrainer:
                 else:
                     memory_state = output_memory_state.detach()
             
-            total_loss += loss_dict["loss"]
+            # Apply weight
+            step_loss = loss_dict["loss"] * loss_weight
+            
+            total_loss += step_loss
+            total_raw_loss += loss_dict["loss"].item()
             total_acc += loss_dict.get("wm_acc_mean", torch.tensor(0.0)).item()
             valid_steps += 1
             
         avg_loss = total_loss / valid_steps if valid_steps > 0 else total_loss
+        avg_raw_loss = total_raw_loss / valid_steps if valid_steps > 0 else 0.0
         
         if self.accelerator:
             self.accelerator.backward(avg_loss)
@@ -358,7 +414,8 @@ class OfflineTrainer:
             self.memory_manager.update(output_memory_state.detach())
             
         return {
-            "loss": avg_loss.item(), 
+            "loss": avg_raw_loss, 
+            "weighted_loss": avg_loss.item(),
             "accuracy": total_acc / valid_steps if valid_steps > 0 else 0.0,
             "final_memory_state": output_memory_state.detach() if output_memory_state is not None else None
         }
@@ -533,24 +590,93 @@ class OfflineTrainer:
     def get_episode_iterator(self, batch_size: int):
         """
         Get an iterator over batches of full episodes.
-        Data is already sharded in load_data, so we just shuffle and batch.
+        If using WeightedEpisodeBuffer, constructs an epoch by:
+        1. Identifying the bottleneck dataset (min N_i / w_i).
+        2. Taking all episodes from the bottleneck dataset.
+        3. Sampling from other datasets to match the weight ratios relative to the bottleneck.
+        
+        Otherwise, shuffles all episodes and iterates.
         """
-        # 1. Get all episodes (already sharded)
-        all_episodes = list(self.replay_buffer.episodes)
-        
-        # 2. Shuffle
-        np.random.shuffle(all_episodes)
-        
-        # 3. Yield batches
-        for i in range(0, len(all_episodes), batch_size):
-            yield all_episodes[i : i + batch_size]
+        if self.datasets_config:
+            buffers = self.replay_buffer.buffers
+            weights = self.replay_buffer.weights
+            counts = [len(b.episodes) for b in buffers]
+            
+            if any(c == 0 for c in counts):
+                logger.warning("One of the datasets is empty. Epoch will be empty.")
+                return
+            
+            # 1. Identify bottleneck
+            # We want to find i such that counts[i] / weights[i] is minimized
+            ratios = [c / w for c, w in zip(counts, weights)]
+            bottleneck_idx = np.argmin(ratios)
+            
+            base_count = counts[bottleneck_idx]
+            base_weight = weights[bottleneck_idx]
+            
+            # 2. Collect episodes for this epoch
+            epoch_episodes = []
+            for i, buffer in enumerate(buffers):
+                # Calculate target count for this dataset
+                # count_i / count_base = weight_i / weight_base
+                target_count = int(base_count * (weights[i] / base_weight))
+                target_count = min(target_count, len(buffer.episodes))
+                
+                if i == bottleneck_idx:
+                    # Take all
+                    epoch_episodes.extend(buffer.episodes)
+                else:
+                    # Sample without replacement
+                    indices = np.random.choice(len(buffer.episodes), size=target_count, replace=False)
+                    for idx in indices:
+                        epoch_episodes.append(buffer.episodes[idx])
+            
+            # 3. Shuffle and yield
+            np.random.shuffle(epoch_episodes)
+            
+            for i in range(0, len(epoch_episodes), batch_size):
+                yield epoch_episodes[i : i + batch_size]
+        else:
+            # 1. Get all episodes (already sharded)
+            all_episodes = list(self.replay_buffer.episodes)
+            
+            # 2. Shuffle
+            np.random.shuffle(all_episodes)
+            
+            # 3. Yield batches
+            for i in range(0, len(all_episodes), batch_size):
+                yield all_episodes[i : i + batch_size]
 
     def train(self, num_epochs: int, start_epoch: int = 0, vis_every_episodes: int = 20):
         self.load_data()
         
         # Calculate total steps (approximate for scheduler)
         # We iterate through all episodes, chunked by bptt_length
-        total_transitions = sum(len(ep) for ep in self.replay_buffer.episodes)
+        total_episodes_per_epoch = 0
+        if self.datasets_config:
+            buffers = self.replay_buffer.buffers
+            weights = self.replay_buffer.weights
+            counts = [len(b.episodes) for b in buffers]
+            if any(c == 0 for c in counts):
+                total_transitions = 0
+            else:
+                ratios = [c / w for c, w in zip(counts, weights)]
+                bottleneck_idx = np.argmin(ratios)
+                base_count = counts[bottleneck_idx]
+                base_weight = weights[bottleneck_idx]
+                
+                total_transitions = 0
+                for i, buffer in enumerate(buffers):
+                    target_count = int(base_count * (weights[i] / base_weight))
+                    target_count = min(target_count, len(buffer.episodes))
+                    total_episodes_per_epoch += target_count
+                    
+                    # Estimate transitions: average length * target_count
+                    avg_len = np.mean([len(ep) for ep in buffer.episodes]) if buffer.episodes else 0
+                    total_transitions += int(avg_len * target_count)
+        else:
+            total_episodes_per_epoch = len(self.replay_buffer.episodes)
+            total_transitions = sum(len(ep) for ep in self.replay_buffer.episodes)
         # Note: total_transitions is already per-process since we only loaded local data
             
         # If sequential, we process in chunks of bptt_length
@@ -586,7 +712,7 @@ class OfflineTrainer:
                 # Use tqdm for inner loop if main process
                 if self._is_main_process():
                     # Estimate number of batches
-                    num_batches = len(self.replay_buffer.episodes) // self.config.batch_size
+                    num_batches = total_episodes_per_epoch // self.config.batch_size
                     step_pbar = tqdm(episode_iterator, total=num_batches, desc=f"Ep {epoch+1}", leave=False)
                 else:
                     step_pbar = episode_iterator
@@ -647,7 +773,7 @@ class OfflineTrainer:
                             batch_episodes = [batch_episodes[i] for i in active_indices]
                         
                         # Train step
-                        result = self.train_step_sequential(sequences, initial_memory_state=memory_state)
+                        result = self.train_step_sequential(sequences, initial_memory_state=memory_state, episode_step_start=t)
                         
                         # Visualization (every 1000 steps)
                         # Removed old visualization logic
